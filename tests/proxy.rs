@@ -36,7 +36,17 @@ async fn mock_upstream(seen: Arc<Mutex<Vec<String>>>) -> String {
                 }
             }),
         )
-        .route("/v1/models", axum::routing::get(|| async { r#"{"data":[]}"# }));
+        .route("/v1/models", axum::routing::get(|| async { r#"{"data":[]}"# }))
+        .route(
+            "/v1/completions",
+            post(|| async {
+                Response::builder()
+                    .status(400)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"error":{"message":"bad request"}}"#))
+                    .unwrap()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -158,6 +168,8 @@ async fn unreachable_upstream_returns_502_and_records_failure() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let msg = body["error"]["message"].as_str().unwrap();
     assert!(msg.contains("LM Studio at http://127.0.0.1:1 is unavailable"), "{msg}");
+    let lower = msg.to_lowercase();
+    assert!(lower.contains("refused") || lower.contains("connect"), "{msg}");
     assert_eq!(body["error"]["type"], "upstream_unavailable");
 
     let rows = wait_for_rows(&state, 1).await;
@@ -171,6 +183,26 @@ async fn unreachable_upstream_on_uncounted_path_records_nothing() {
     assert_eq!(resp.status(), 502);
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(db::list(&state.db.lock().unwrap(), 50, 0, None).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn streaming_request_with_json_error_upstream_is_forwarded_and_recorded() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (proxy, state) = start(mock_upstream(seen).await).await;
+    let resp = reqwest::Client::new()
+        .post(format!("{proxy}/v1/completions"))
+        .header("content-type", "application/json")
+        .body(r#"{"model":"m","prompt":"x","stream":true}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap();
+    assert_eq!(body, r#"{"error":{"message":"bad request"}}"#);
+
+    let rows = wait_for_rows(&state, 1).await;
+    let r = &rows[0];
+    assert_eq!((r.status, r.total_tokens, r.stream), (400, 0, true));
 }
 
 #[tokio::test]
@@ -223,4 +255,9 @@ async fn api_lists_and_aggregates() {
     let html = reqwest::get(format!("{proxy}/dashboard")).await.unwrap();
     assert_eq!(html.status(), 200);
     assert!(html.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+
+    let no_redirect = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let root = no_redirect.get(format!("{proxy}/")).send().await.unwrap();
+    assert!(root.status().is_redirection(), "{}", root.status());
+    assert_eq!(root.headers()["location"], "/dashboard");
 }

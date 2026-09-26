@@ -15,6 +15,7 @@ type ApiError = (StatusCode, String);
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/", get(|| async { axum::response::Redirect::to("/dashboard") }))
         .route("/dashboard", get(|| async { Html(include_str!("../static/dashboard.html")) }))
         .route("/api/requests", get(requests))
         .route("/api/aggregate", get(aggregate))

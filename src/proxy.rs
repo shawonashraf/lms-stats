@@ -17,6 +17,10 @@ use crate::{
 
 const COUNTED: &[&str] = &["/v1/chat/completions", "/v1/completions", "/v1/embeddings"];
 
+/// Cap request body buffering so a runaway client can't exhaust memory; 64 MiB
+/// leaves room for base64-encoded vision payloads.
+const MAX_BODY: usize = 64 << 20;
+
 /// Headers that must not be copied between the two hops. `content-length` is
 /// recomputed; `accept-encoding` is dropped so upstream never compresses a body
 /// we need to read.
@@ -47,29 +51,31 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     let path_and_query = parts.uri.path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| path.clone());
-    let mut body = match axum::body::to_bytes(body, usize::MAX).await {
+    let mut body = match axum::body::to_bytes(body, MAX_BODY).await {
         Ok(b) => b.to_vec(),
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
     let mut counted = None;
-    if parts.method == Method::POST && COUNTED.contains(&path.as_str()) {
-        if let Ok(mut v) = serde_json::from_slice::<Value>(&body) && v.is_object() {
-            let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
-            let stream = v.get("stream").and_then(Value::as_bool).unwrap_or(false);
-            let mut client_wanted_usage = true;
-            if stream {
-                client_wanted_usage = v.pointer("/stream_options/include_usage").and_then(Value::as_bool).unwrap_or(false);
-                if !client_wanted_usage {
-                    if !v["stream_options"].is_object() {
-                        v["stream_options"] = serde_json::json!({});
-                    }
-                    v["stream_options"]["include_usage"] = Value::Bool(true);
-                    body = serde_json::to_vec(&v).expect("re-serialize json");
+    if parts.method == Method::POST
+        && COUNTED.contains(&path.as_str())
+        && let Ok(mut v) = serde_json::from_slice::<Value>(&body)
+        && v.is_object()
+    {
+        let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+        let stream = v.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        let mut client_wanted_usage = true;
+        if stream {
+            client_wanted_usage = v.pointer("/stream_options/include_usage").and_then(Value::as_bool).unwrap_or(false);
+            if !client_wanted_usage {
+                if !v["stream_options"].is_object() {
+                    v["stream_options"] = serde_json::json!({});
                 }
+                v["stream_options"]["include_usage"] = Value::Bool(true);
+                body = serde_json::to_vec(&v).expect("re-serialize json");
             }
-            counted = Some(Counted { model, stream, client_wanted_usage });
         }
+        counted = Some(Counted { model, stream, client_wanted_usage });
     }
 
     let mut upstream = state.client.request(parts.method.clone(), format!("{}{}", state.upstream, path_and_query));
@@ -103,7 +109,10 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     if !c.stream {
         let bytes = match resp.bytes().await {
             Ok(b) => b,
-            Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream body error: {e}")).into_response(),
+            Err(e) => {
+                record(&state, ts, &path, &c, StatusCode::BAD_GATEWAY, started, None);
+                return (StatusCode::BAD_GATEWAY, format!("upstream body error: {e}")).into_response();
+            }
         };
         let found = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| usage::from_json(&v));
         record(&state, ts, &path, &c, status, started, found);
@@ -117,15 +126,21 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     tokio::spawn(async move {
         let mut tap = SseTap::new(!c.client_wanted_usage);
         let mut upstream_body = resp.bytes_stream();
+        // Recorded status defaults to the upstream's; overridden below if the
+        // stream ends abnormally: 499 (client closed request) if the client
+        // went away, 502 (bad gateway) if the upstream stream itself errored.
+        let mut outcome = status;
         while let Some(item) = upstream_body.next().await {
             match item {
                 Ok(chunk) => {
                     let out = tap.feed(&chunk);
                     if !out.is_empty() && tx.send(Ok(out.into())).await.is_err() {
+                        outcome = StatusCode::from_u16(499).unwrap();
                         break; // client disconnected; dropping `upstream_body` aborts upstream
                     }
                 }
                 Err(e) => {
+                    outcome = StatusCode::BAD_GATEWAY;
                     let _ = tx.send(Err(std::io::Error::other(e))).await;
                     break;
                 }
@@ -135,7 +150,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         if !rest.is_empty() {
             let _ = tx.send(Ok(rest.into())).await;
         }
-        record(&state2, ts, &path, &c, status, started, tap.usage);
+        record(&state2, ts, &path, &c, outcome, started, tap.usage);
     });
     let client_body = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
     build(status, headers, Body::from_stream(client_body))
@@ -143,9 +158,16 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
 
 /// OpenAI-style error body so SDK clients surface a readable message instead of a bare 502.
 fn unavailable(upstream: &str, err: &reqwest::Error) -> Response {
+    let mut cause = err.to_string();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
+    while let Some(e) = source {
+        cause.push_str(": ");
+        cause.push_str(&e.to_string());
+        source = e.source();
+    }
     let body = serde_json::json!({
         "error": {
-            "message": format!("LM Studio at {upstream} is unavailable: {err}"),
+            "message": format!("LM Studio at {upstream} is unavailable: {cause}"),
             "type": "upstream_unavailable"
         }
     });

@@ -130,7 +130,7 @@
   <div class="foot"><span id="count"></span><button id="more">Load more</button></div>
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
 <script>
 const $ = (s) => document.querySelector(s);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -195,23 +195,25 @@ async function loadAggregate() {
     { label: "output", data: data.buckets.map((b) => b.completion - b.reasoning), backgroundColor: css("--output") },
     { label: "reasoning", data: data.buckets.map((b) => b.reasoning), backgroundColor: css("--reasoning") },
   ];
-  if (chart) chart.destroy();
-  chart = new Chart($("#chart"), {
-    type: "bar",
-    data: { labels, datasets: series.map((s) => ({ ...s, borderWidth: 1, borderColor: css("--page"), borderRadius: 3, borderSkipped: false, maxBarThickness: 36 })) },
-    options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } },
+  if (window.Chart) {
+    if (chart) chart.destroy();
+    chart = new Chart($("#chart"), {
+      type: "bar",
+      data: { labels, datasets: series.map((s) => ({ ...s, borderWidth: 1, borderColor: css("--page"), borderRadius: 3, borderSkipped: false, maxBarThickness: 36 })) },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } },
+        },
+        scales: {
+          x: { stacked: true, grid: { display: false }, border: { color: css("--line") }, ticks: { color: css("--muted") } },
+          y: { stacked: true, beginAtZero: true, grid: { color: css("--line-soft") }, border: { display: false }, ticks: { color: css("--muted"), callback: fmt, maxTicksLimit: 6 } },
+        },
       },
-      scales: {
-        x: { stacked: true, grid: { display: false }, border: { color: css("--line") }, ticks: { color: css("--muted") } },
-        y: { stacked: true, beginAtZero: true, grid: { color: css("--line-soft") }, border: { display: false }, ticks: { color: css("--muted"), callback: fmt, maxTicksLimit: 6 } },
-      },
-    },
-  });
+    });
+  }
   $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
 }
 
@@ -236,10 +238,14 @@ async function loadRows(reset) {
 }
 
 async function refresh(auto = false) {
-  await loadModels();
-  const tasks = [loadAggregate()];
-  if (!auto || offset <= PAGE) tasks.push(loadRows(true));
-  await Promise.all(tasks);
+  try {
+    await loadModels();
+    const tasks = [loadAggregate()];
+    if (!auto || offset <= PAGE) tasks.push(loadRows(true));
+    await Promise.all(tasks);
+  } catch (e) {
+    $("#updated").textContent = "update failed: " + (e && e.message ? e.message : e);
+  }
 }
 
 $("#bucket").addEventListener("click", (e) => {

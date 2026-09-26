@@ -70,24 +70,29 @@ impl BucketSize {
         }
     }
 
-    fn strftime(self) -> &'static str {
+    /// Full SQL expression producing this bucket's key from `ts`.
+    fn sql_key(self) -> &'static str {
         match self {
-            Self::Day => "%Y-%m-%d",
-            Self::Week => "%Y-W%W",
-            Self::Month => "%Y-%m",
-            Self::Year => "%Y",
+            Self::Day => "strftime('%Y-%m-%d', ts, 'unixepoch', 'localtime')",
+            // Monday of the week containing `ts`: advance to the next Sunday
+            // (or stay if already Sunday), then step back 6 days.
+            Self::Week => "date(ts, 'unixepoch', 'localtime', 'weekday 0', '-6 days')",
+            Self::Month => "strftime('%Y-%m', ts, 'unixepoch', 'localtime')",
+            Self::Year => "strftime('%Y', ts, 'unixepoch', 'localtime')",
         }
     }
 }
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
+    conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
@@ -148,12 +153,12 @@ pub fn aggregate(
     model: Option<&str>,
 ) -> rusqlite::Result<(Totals, Vec<Bucket>)> {
     let sql = format!(
-        "SELECT strftime('{}', ts, 'unixepoch', 'localtime') AS k,
+        "SELECT {} AS k,
                 COUNT(*), SUM(prompt_tokens), SUM(completion_tokens), SUM(reasoning_tokens), SUM(total_tokens)
          FROM requests
          WHERE ts >= ?1 AND ts < ?2 AND (?3 IS NULL OR model = ?3)
          GROUP BY k ORDER BY k",
-        bucket.strftime()
+        bucket.sql_key()
     );
     let mut stmt = conn.prepare(&sql)?;
     let buckets = stmt
@@ -183,7 +188,7 @@ pub fn aggregate(
 }
 
 pub fn models(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT model FROM requests ORDER BY model")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT model FROM requests WHERE model <> '' ORDER BY model")?;
     let rows = stmt.query_map([], |r| r.get(0))?;
     rows.collect()
 }
@@ -248,9 +253,11 @@ mod tests {
         assert_eq!(days[1].totals, Totals { requests: 1, prompt: 30, completion: 12, reasoning: 4, total: 42 });
         assert_eq!(totals, Totals { requests: 3, prompt: 60, completion: 25, reasoning: 6, total: 85 });
 
-        // Fri 25 and Sat 26 Sep 2026 share an ISO-ish week (%W, Monday start).
+        // Fri 25 and Sat 26 Sep 2026 share a Monday-start week; both timestamps
+        // are noon UTC so the Monday key holds in any real timezone.
         let (_, weeks) = aggregate(&c, BucketSize::Week, 0, i64::MAX, None).unwrap();
         assert_eq!(weeks.len(), 1);
+        assert_eq!(weeks[0].key, "2026-09-21");
         let (_, months) = aggregate(&c, BucketSize::Month, 0, i64::MAX, None).unwrap();
         assert_eq!(months.len(), 1);
         let (_, years) = aggregate(&c, BucketSize::Year, 0, i64::MAX, None).unwrap();
@@ -272,7 +279,10 @@ mod tests {
     #[test]
     fn models_are_distinct_and_sorted() {
         let c = seeded();
-        assert_eq!(models(&c).unwrap(), vec!["a".to_string(), "b".to_string()]);
+        insert(&c, &row(DAY1, "", 1, 1, 0)).unwrap();
+        let names = models(&c).unwrap();
+        assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
+        assert!(!names.contains(&String::new()));
     }
 
     #[test]
