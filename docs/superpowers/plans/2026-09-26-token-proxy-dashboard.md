@@ -1757,3 +1757,309 @@ Runs the release binary with Restart=always and keeps the DB under
 /var/lib/lms-stats so it survives cargo clean. Install is documented,
 not automated."
 ```
+
+---
+
+### Task 9: Dashboard redesign, instrument-panel aesthetic
+
+**Files:**
+- Modify: `static/dashboard.html` (full replacement)
+
+**Interfaces:**
+- Consumes: the three JSON routes exactly as Task 5 defines them. No API or Rust changes.
+- Preserves from the Task 6 fix round: the `esc()` helper on every data-derived string, and `refresh(auto)` skipping the table reload on auto ticks once the user has paged past the first page.
+
+Design decisions (approved 2026-09-26): dark graphite by default with a light variant under `prefers-color-scheme: light`; IBM Plex Sans with tabular figures; a hero total with a full-width stacked proportion bar replaces the tiles; segmented bucket control; text range buttons; hairlines instead of cards; no entrance motion; "updated hh:mm:ss" in the header; "streamed" text in the stream column; status ≥ 400 in red.
+
+- [ ] **Step 1: Replace the page**
+
+Replace `static/dashboard.html` with:
+
+```html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lms-stats</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: dark;
+    --page: #1b1e22; --panel: #22262b; --line: #31363c; --line-soft: #292d32;
+    --ink: #e9e7e2; --ink-2: #9b9a94; --muted: #6f6e69;
+    --prompt: #3987e5; --output: #d95926; --reasoning: #199e70; --bad: #e66767;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --page: #f6f6f4; --panel: #ffffff; --line: #d9d8d3; --line-soft: #e8e7e2;
+      --ink: #15171a; --ink-2: #55544f; --muted: #8a8983;
+      --prompt: #2a78d6; --output: #eb6834; --reasoning: #1baf7a; --bad: #d03b3b;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--page); }
+  body { margin: 0; padding: 28px 20px 48px; color: var(--ink); background: var(--page);
+         font: 14px/1.45 "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+         font-variant-numeric: tabular-nums; }
+  main { max-width: 1080px; margin: 0 auto; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+           padding-bottom: 14px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+  header h1 span { color: var(--ink-2); font-weight: 400; margin-left: 10px; }
+  #updated { color: var(--muted); font-size: 12px; white-space: nowrap; }
+
+  .hero { padding: 28px 0 22px; border-bottom: 1px solid var(--line); }
+  .hero-row { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px 24px; }
+  .hero-num { font-size: 56px; font-weight: 500; line-height: 1; letter-spacing: -0.02em; }
+  .hero-num small { font-size: 18px; font-weight: 400; color: var(--ink-2); margin-left: 8px; letter-spacing: 0; }
+  .hero-meta { color: var(--ink-2); }
+  .bar { display: flex; gap: 2px; height: 14px; margin: 18px 0 10px; background: var(--line-soft); border-radius: 2px; overflow: hidden; }
+  .bar span { display: block; height: 100%; flex: 0 0 0%; transition: flex-basis 200ms ease; }
+  .bar .p { background: var(--prompt); }
+  .bar .o { background: var(--output); }
+  .bar .r { background: var(--reasoning); }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 22px; color: var(--ink-2); font-size: 13px; }
+  .legend b { color: var(--ink); font-weight: 500; margin-left: 5px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 7px; vertical-align: -1px; }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 18px 0 6px; }
+  button, select { font: inherit; color: var(--ink); cursor: pointer; }
+  button { border: 1px solid var(--line); background: transparent; border-radius: 6px; padding: 5px 12px; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--prompt); outline-offset: 2px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button.active { background: var(--prompt); color: #fff; }
+  .ranges { display: inline-flex; flex-wrap: wrap; gap: 2px; }
+  .ranges button { border: 0; padding: 5px 9px; color: var(--ink-2); }
+  .ranges button.active { color: var(--prompt); font-weight: 500; }
+  select { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; margin-left: auto; max-width: 100%; }
+
+  .chart { position: relative; height: 260px; margin: 4px 0 8px; }
+
+  .tablewrap { overflow-x: auto; border-top: 1px solid var(--line); margin-top: 18px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 9px 10px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  th:nth-child(-n+3), td:nth-child(-n+3) { text-align: left; }
+  td:nth-child(2) { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  td.dim { color: var(--muted); }
+  td.bad { color: var(--bad); font-weight: 500; }
+  td.empty { color: var(--muted); text-align: left; padding: 24px 10px; white-space: normal; }
+  .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; padding: 12px 0; }
+
+  @media (prefers-reduced-motion: reduce) { .bar span { transition: none; } }
+  @media (max-width: 520px) { .hero-num { font-size: 40px; } select { margin-left: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>lms-stats<span>token usage via proxy</span></h1>
+    <span id="updated"></span>
+  </header>
+
+  <section class="hero">
+    <div class="hero-row">
+      <div class="hero-num"><span id="total">0</span><small>tokens</small></div>
+      <div class="hero-meta" id="meta"></div>
+    </div>
+    <div class="bar" aria-hidden="true"><span class="p" id="bar-p"></span><span class="o" id="bar-o"></span><span class="r" id="bar-r"></span></div>
+    <div class="legend">
+      <span><i style="background:var(--prompt)"></i>prompt<b id="n-prompt">0</b></span>
+      <span><i style="background:var(--output)"></i>output<b id="n-output">0</b></span>
+      <span><i style="background:var(--reasoning)"></i>reasoning<b id="n-reasoning">0</b></span>
+    </div>
+  </section>
+
+  <div class="controls">
+    <div class="seg" id="bucket" role="group" aria-label="Bucket">
+      <button data-bucket="day" class="active">day</button>
+      <button data-bucket="week">week</button>
+      <button data-bucket="month">month</button>
+      <button data-bucket="year">year</button>
+    </div>
+    <div class="ranges" id="ranges" role="group" aria-label="Range">
+      <button data-days="1">today</button>
+      <button data-days="7" class="active">7 days</button>
+      <button data-days="30">30 days</button>
+      <button data-days="ytd">this year</button>
+      <button data-days="all">all</button>
+    </div>
+    <select id="model" aria-label="Model"><option value="">all models</option></select>
+  </div>
+
+  <div class="chart"><canvas id="chart"></canvas></div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>time</th><th>model</th><th>endpoint</th>
+        <th>prompt</th><th>output</th><th>reasoning</th><th>total</th>
+        <th>stream</th><th>status</th><th>ms</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="foot"><span id="count"></span><button id="more">Load more</button></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const fmt = (n) => Number(n).toLocaleString();
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const PAGE = 50;
+const ENDPOINT_SHORT = { "/v1/chat/completions": "chat", "/v1/completions": "completion", "/v1/embeddings": "embeddings" };
+const RANGE_LABEL = { "1": "today", "7": "last 7 days", "30": "last 30 days", "ytd": "this year", "all": "all time" };
+
+let bucket = "day";
+let range = "7";
+let offset = 0;
+let chart;
+
+function rangeBounds() {
+  const now = new Date();
+  const to = Math.floor(now.getTime() / 1000) + 1;
+  if (range === "all") return { from: 0, to };
+  if (range === "ytd") return { from: Math.floor(new Date(now.getFullYear(), 0, 1).getTime() / 1000), to };
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  start.setDate(start.getDate() - (Number(range) - 1));
+  return { from: Math.floor(start.getTime() / 1000), to };
+}
+
+function qs(extra) {
+  return new URLSearchParams({ model: $("#model").value, ...extra }).toString();
+}
+
+function setActive(groupSel, btn) {
+  document.querySelectorAll(`${groupSel} button`).forEach((x) => x.classList.toggle("active", x === btn));
+}
+
+async function loadModels() {
+  const models = await (await fetch("/api/models")).json();
+  const sel = $("#model");
+  const current = sel.value;
+  sel.innerHTML = '<option value="">all models</option>' + models.map((m) => `<option>${esc(m)}</option>`).join("");
+  sel.value = models.includes(current) ? current : "";
+}
+
+async function loadAggregate() {
+  const { from, to } = rangeBounds();
+  const data = await (await fetch(`/api/aggregate?${qs({ bucket, from, to })}`)).json();
+  const t = data.totals;
+  const output = t.completion - t.reasoning;
+
+  $("#total").textContent = fmt(t.total);
+  $("#meta").textContent = `${fmt(t.requests)} ${t.requests === 1 ? "request" : "requests"}, ${RANGE_LABEL[range]}`;
+  $("#n-prompt").textContent = fmt(t.prompt);
+  $("#n-output").textContent = fmt(output);
+  $("#n-reasoning").textContent = fmt(t.reasoning);
+  const denom = Math.max(t.total, 1);
+  for (const [id, v] of [["#bar-p", t.prompt], ["#bar-o", output], ["#bar-r", t.reasoning]]) {
+    const el = $(id);
+    el.style.flexBasis = `${(v / denom) * 100}%`;
+    el.style.display = v > 0 ? "" : "none";
+  }
+
+  const labels = data.buckets.map((b) => b.key);
+  const series = [
+    { label: "prompt", data: data.buckets.map((b) => b.prompt), backgroundColor: css("--prompt") },
+    { label: "output", data: data.buckets.map((b) => b.completion - b.reasoning), backgroundColor: css("--output") },
+    { label: "reasoning", data: data.buckets.map((b) => b.reasoning), backgroundColor: css("--reasoning") },
+  ];
+  if (chart) chart.destroy();
+  chart = new Chart($("#chart"), {
+    type: "bar",
+    data: { labels, datasets: series.map((s) => ({ ...s, borderWidth: 1, borderColor: css("--page"), borderRadius: 3, borderSkipped: false, maxBarThickness: 36 })) },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${fmt(c.parsed.y)}` } },
+      },
+      scales: {
+        x: { stacked: true, grid: { display: false }, border: { color: css("--line") }, ticks: { color: css("--muted") } },
+        y: { stacked: true, beginAtZero: true, grid: { color: css("--line-soft") }, border: { display: false }, ticks: { color: css("--muted"), callback: fmt, maxTicksLimit: 6 } },
+      },
+    },
+  });
+  $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+}
+
+async function loadRows(reset) {
+  if (reset) { offset = 0; $("#rows").innerHTML = ""; }
+  const rows = await (await fetch(`/api/requests?${qs({ limit: PAGE, offset })}`)).json();
+  if (reset && rows.length === 0) {
+    $("#rows").innerHTML = '<tr><td colspan="10" class="empty">No requests recorded yet. Point a client at this proxy\'s /v1 and they will appear here.</td></tr>';
+  }
+  offset += rows.length;
+  $("#rows").insertAdjacentHTML("beforeend", rows.map((r) => `<tr>
+    <td>${new Date(r.ts * 1000).toLocaleString()}</td>
+    <td title="${esc(r.model)}">${esc(r.model || "—")}</td>
+    <td>${esc(ENDPOINT_SHORT[r.endpoint] || r.endpoint)}</td>
+    <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.completion_tokens - r.reasoning_tokens)}</td>
+    <td>${fmt(r.reasoning_tokens)}</td><td>${fmt(r.total_tokens)}</td>
+    <td class="dim">${r.stream ? "streamed" : ""}</td>
+    <td class="${r.status >= 400 ? "bad" : "dim"}">${r.status}</td><td class="dim">${fmt(r.duration_ms)}</td>
+  </tr>`).join(""));
+  $("#count").textContent = offset ? `${fmt(offset)} shown` : "";
+  $("#more").hidden = rows.length < PAGE;
+}
+
+async function refresh(auto = false) {
+  await loadModels();
+  const tasks = [loadAggregate()];
+  if (!auto || offset <= PAGE) tasks.push(loadRows(true));
+  await Promise.all(tasks);
+}
+
+$("#bucket").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  bucket = b.dataset.bucket;
+  setActive("#bucket", b);
+  loadAggregate();
+});
+$("#ranges").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  range = b.dataset.days;
+  setActive("#ranges", b);
+  loadAggregate();
+});
+$("#model").addEventListener("change", () => refresh());
+$("#more").addEventListener("click", () => loadRows(false));
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", loadAggregate);
+
+refresh();
+setInterval(() => refresh(true), 15000);
+</script>
+</body>
+</html>
+```
+
+- [ ] **Step 2: Tests still pass**
+
+Run: `cargo test`
+Expected: 18 passed, no warnings (the `/dashboard` route test only checks the content type; the page is embedded via `include_str!` so the binary rebuilds).
+
+- [ ] **Step 3: Live check**
+
+`rm -f /tmp/lms-dash.db; LMS_LISTEN=127.0.0.1:1235 LMS_DB=/tmp/lms-dash.db cargo run -q &`, sleep 4, seed the same three requests as Task 6 step 3, then `curl -s http://127.0.0.1:1235/dashboard | grep -c 'hero-num'` must print 1. The controller does the visual check in Chrome (dark, light, and ~400px width). Kill the server and remove the temp DB.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add static/dashboard.html
+git commit -m "Redesign dashboard as an instrument panel
+
+Hero total with a stacked proportion bar replaces the tiles, hairlines
+replace cards, segmented bucket control, IBM Plex Sans with tabular
+figures, dark by default with a light variant. Behaviour, API calls,
+escaping and the auto-refresh pagination guard are unchanged."
+```
