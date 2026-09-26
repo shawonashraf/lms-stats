@@ -1,0 +1,8 @@
+{
+  "uuid": "lms-stats@shawonashraf",
+  "name": "lms-stats",
+  "description": "Token usage from the lms-stats LM Studio proxy: all-time total in the panel, today / this week / this month on click.",
+  "shell-version": ["48", "49", "50"],
+  "url": "https://github.com/shawonashraf/lms-stats",
+  "version": 1
+}

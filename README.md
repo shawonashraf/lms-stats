@@ -110,6 +110,21 @@ the database in `/var/lib/lms-stats/`, and restarts on crash. After
 the new binary. Edit the `Environment=` lines in the unit to change upstream,
 port or DB path.
 
+## GNOME Shell extension
+
+`gnome-extension/lms-stats@shawonashraf/` adds a top-bar indicator: the
+all-time token total next to a small monitor icon, and on click today / this
+week / this month with request counts, plus an "Open dashboard" entry. It
+polls the proxy at `http://127.0.0.1:1235` every 15 seconds (change the
+`PROXY` constant at the top of `extension.js` if the proxy runs elsewhere).
+GNOME Shell 48 to 50.
+
+    ln -s "$PWD/gnome-extension/lms-stats@shawonashraf" ~/.local/share/gnome-shell/extensions/
+    gnome-extensions enable lms-stats@shawonashraf   # or after the next login
+
+On Wayland the Shell only picks up new extensions at login, so log out and
+back in once. Errors, if any, show up in `journalctl --user -b /usr/bin/gnome-shell`.
+
 ## Development
 
     cargo test                    # unit tests plus an integration test against a mock LM Studio
