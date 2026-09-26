@@ -92,6 +92,7 @@
 const $ = (s) => document.querySelector(s);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const fmt = (n) => Number(n).toLocaleString();
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PAGE = 50;
 
 let range = "7";
@@ -117,7 +118,7 @@ async function loadModels() {
   const models = await (await fetch("/api/models")).json();
   const sel = $("#model");
   const current = sel.value;
-  sel.innerHTML = '<option value="">all</option>' + models.map((m) => `<option>${m}</option>`).join("");
+  sel.innerHTML = '<option value="">all</option>' + models.map((m) => `<option>${esc(m)}</option>`).join("");
   sel.value = models.includes(current) ? current : "";
 }
 
@@ -162,7 +163,7 @@ async function loadRows(reset) {
   offset += rows.length;
   $("#rows").insertAdjacentHTML("beforeend", rows.map((r) => `<tr>
     <td>${new Date(r.ts * 1000).toLocaleString()}</td>
-    <td>${r.model || "—"}</td><td>${r.endpoint}</td>
+    <td>${esc(r.model || "—")}</td><td>${esc(r.endpoint)}</td>
     <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.completion_tokens - r.reasoning_tokens)}</td>
     <td>${fmt(r.reasoning_tokens)}</td><td>${fmt(r.total_tokens)}</td>
     <td>${r.stream ? "yes" : "no"}</td>
@@ -172,9 +173,11 @@ async function loadRows(reset) {
   $("#more").hidden = rows.length < PAGE;
 }
 
-async function refresh() {
+async function refresh(auto = false) {
   await loadModels();
-  await Promise.all([loadAggregate(), loadRows(true)]);
+  const tasks = [loadAggregate()];
+  if (!auto || offset <= PAGE) tasks.push(loadRows(true));
+  await Promise.all(tasks);
 }
 
 $("#bucket").addEventListener("change", loadAggregate);
@@ -189,7 +192,7 @@ $("#ranges").addEventListener("click", (e) => {
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", loadAggregate);
 
 refresh();
-setInterval(refresh, 15000);
+setInterval(() => refresh(true), 15000);
 </script>
 </body>
 </html>
