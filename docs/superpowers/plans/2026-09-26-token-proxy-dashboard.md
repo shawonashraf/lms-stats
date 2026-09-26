@@ -919,22 +919,39 @@ async fn uncounted_paths_pass_through_without_rows() {
 }
 
 #[tokio::test]
-async fn unreachable_upstream_returns_502() {
-    let (proxy, _state) = start("http://127.0.0.1:1".to_string()).await;
+async fn unreachable_upstream_returns_502_and_records_failure() {
+    let (proxy, state) = start("http://127.0.0.1:1".to_string()).await;
     let resp = reqwest::Client::new()
         .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
         .body(r#"{"model":"m","messages":[]}"#)
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 502);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let msg = body["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("LM Studio at http://127.0.0.1:1 is unavailable"), "{msg}");
+    assert_eq!(body["error"]["type"], "upstream_unavailable");
+
+    let rows = wait_for_rows(&state, 1).await;
+    assert_eq!((rows[0].status, rows[0].total_tokens, rows[0].model.as_str()), (502, 0, "m"));
+}
+
+#[tokio::test]
+async fn unreachable_upstream_on_uncounted_path_records_nothing() {
+    let (proxy, state) = start("http://127.0.0.1:1".to_string()).await;
+    let resp = reqwest::get(format!("{proxy}/v1/models")).await.unwrap();
+    assert_eq!(resp.status(), 502);
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(db::list(&state.db.lock().unwrap(), 50, 0, None).unwrap().is_empty());
 }
 ```
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `cargo test --test proxy`
-Expected: all 5 tests FAIL (the stub returns 501).
+Expected: all 6 tests FAIL (the stub returns 501).
 
 - [ ] **Step 3: Implement the handler**
 
@@ -1023,7 +1040,13 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     }
     let resp = match upstream.body(body).send().await {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response(),
+        Err(e) => {
+            // Make outages visible on the dashboard: one zero-count row with status 502.
+            if let Some(c) = &counted {
+                record(&state, ts, &path, c, StatusCode::BAD_GATEWAY, started, None);
+            }
+            return unavailable(&state.upstream, &e);
+        }
     };
     let status = resp.status();
     let mut headers = HeaderMap::new();
@@ -1078,6 +1101,17 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     build(status, headers, Body::from_stream(client_body))
 }
 
+/// OpenAI-style error body so SDK clients surface a readable message instead of a bare 502.
+fn unavailable(upstream: &str, err: &reqwest::Error) -> Response {
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("LM Studio at {upstream} is unavailable: {err}"),
+            "type": "upstream_unavailable"
+        }
+    });
+    (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response()
+}
+
 fn build(status: StatusCode, headers: HeaderMap, body: Body) -> Response {
     let mut r = Response::new(body);
     *r.status_mut() = status;
@@ -1119,7 +1153,7 @@ Notes for the implementer:
 - [ ] **Step 4: Run all tests**
 
 Run: `cargo test`
-Expected: db 5 passed, usage 6 passed, proxy 5 passed.
+Expected: db 5 passed, usage 6 passed, proxy 6 passed.
 
 - [ ] **Step 5: Commit**
 
@@ -1130,7 +1164,9 @@ git commit -m "Proxy requests to LM Studio and record token usage per request
 Counted POSTs are parsed once to learn model and stream mode; streamed
 requests get include_usage injected and the usage-only chunk is stripped
 again unless the client asked for it. Rows are written after the response
-finishes so a failed request still shows up with zero counts.
+finishes so a failed request still shows up with zero counts, and an
+unreachable LM Studio answers with an OpenAI-style JSON error plus a
+status-502 row.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```
@@ -1642,6 +1678,7 @@ Run `cargo test` (all pass), then with the server running as in Task 6 step 3:
 3. Embeddings: row has `prompt_tokens > 0`.
 4. `curl -s -N ... "stream":true` through the proxy: output contains no `"usage"` line.
 5. `/dashboard` renders with day/week/month/year switching.
+6. With `LMS_UPSTREAM=http://127.0.0.1:9` (nothing listening), a chat request returns 502 with the JSON error naming LM Studio, and a status-502 row appears in `/api/requests`.
 
 Record the actual numbers observed in the commit message body.
 
@@ -1650,6 +1687,89 @@ Record the actual numbers observed in the commit message body.
 ```bash
 git add README.md
 git commit -m "Add README with run instructions and verification notes
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 8: systemd service
+
+**Files:**
+- Create: `lms-stats.service`
+- Modify: `README.md` (append a "Run as a service" section)
+
+**Interfaces:**
+- Consumes: the binary at `target/release/lms-stats` and the env vars from Global Constraints.
+
+- [ ] **Step 1: Write the unit**
+
+Create `lms-stats.service` in the repo root:
+
+```ini
+[Unit]
+Description=lms-stats: token-counting proxy for LM Studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shawon
+WorkingDirectory=/home/shawon/Projects/lms-stats
+ExecStart=/home/shawon/Projects/lms-stats/target/release/lms-stats
+Environment=LMS_UPSTREAM=http://192.168.0.166:1234
+Environment=LMS_LISTEN=0.0.0.0:1235
+Environment=LMS_DB=/var/lib/lms-stats/lms-stats.db
+StateDirectory=lms-stats
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`StateDirectory=lms-stats` makes systemd create `/var/lib/lms-stats` owned by `User`, so the DB lives outside the repo and survives `cargo clean`. `Restart=always` covers crashes; an unreachable LM Studio is not a crash (the proxy answers 502 and keeps running).
+
+- [ ] **Step 2: Verify the unit parses**
+
+Run: `systemd-analyze verify ./lms-stats.service`
+Expected: no output (or only a warning that the ExecStart binary does not exist yet if `cargo build --release` has not been run; run `cargo build --release` first so the check is clean).
+
+- [ ] **Step 3: Document installation**
+
+Append to `README.md`:
+
+```markdown
+## Run as a service
+
+    cargo build --release
+    sudo cp lms-stats.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now lms-stats
+    systemctl status lms-stats
+    journalctl -u lms-stats -f
+
+The unit runs the release binary from this checkout as user `shawon`, keeps
+the database in `/var/lib/lms-stats/`, and restarts on crash. After
+`cargo build --release` again, `sudo systemctl restart lms-stats` picks up
+the new binary. Edit the `Environment=` lines in the unit to change upstream,
+port or DB path.
+
+If LM Studio is down the proxy stays up and answers every request with
+`502` and a JSON error naming the upstream; those requests appear in the
+dashboard with status 502.
+```
+
+Do NOT install the unit yourself (no `sudo`); installation is the user's step.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add lms-stats.service README.md
+git commit -m "Add systemd unit for running the proxy as a service
+
+Runs the release binary with Restart=always and keeps the DB under
+/var/lib/lms-stats so it survives cargo clean. Install is documented,
+not automated.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 ```

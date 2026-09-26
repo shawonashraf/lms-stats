@@ -67,9 +67,17 @@ Usage extraction: `prompt_tokens`, `completion_tokens`, `total_tokens`,
 `completion_tokens_details.reasoning_tokens` (default 0). Embeddings responses
 only have `prompt_tokens` and `total_tokens`; missing fields default to 0.
 
-Errors: upstream connection failure returns `502` with the error message as
-plain text. A DB write failure is logged to stderr and never affects the
-response.
+Errors: if LM Studio cannot be reached (connection refused, timeout, DNS),
+the proxy returns `502` with an OpenAI-style JSON body so SDK clients surface
+a readable message:
+
+```json
+{"error":{"message":"LM Studio at http://192.168.0.166:1234 is unavailable: <cause>","type":"upstream_unavailable"}}
+```
+
+For a counted request this also inserts a row with zero counts and status
+`502`, so outages are visible in the dashboard table. A DB write failure is
+logged to stderr and never affects the response.
 
 ### Storage (`src/db.rs`)
 
@@ -130,6 +138,14 @@ Page (vanilla JS, Chart.js 4 from cdnjs):
 Range presets are computed in the browser and sent as unix seconds; bucketing
 uses the server's local timezone, which is the same machine for this use.
 
+## Deployment
+
+`lms-stats.service` in the repo root is a system-level systemd unit: runs the
+release binary as the login user, `Restart=always` with a 3 s delay, DB under
+`/var/lib/lms-stats` via `StateDirectory`, env vars set in the unit. Install
+is manual (`cargo build --release`, copy to `/etc/systemd/system/`,
+`systemctl enable --now lms-stats`); the README documents it.
+
 ## Dependencies
 
 `axum`, `tokio` (full), `reqwest` (stream, json), `rusqlite` (bundled),
@@ -156,3 +172,6 @@ uses the server's local timezone, which is the same machine for this use.
 3. A client that did not ask for usage never receives a chunk with empty
    `choices`.
 4. `/dashboard` renders totals, chart and table for day/week/month/year.
+5. With LM Studio stopped, a chat request through the proxy returns `502`
+   with the JSON error above, and a row with status 502 appears in the table.
+6. `systemd-analyze verify lms-stats.service` passes.
