@@ -172,3 +172,55 @@ async fn unreachable_upstream_on_uncounted_path_records_nothing() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     assert!(db::list(&state.db.lock().unwrap(), 50, 0, None).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn api_lists_and_aggregates() {
+    let (proxy, state) = start("http://127.0.0.1:1".to_string()).await;
+    {
+        let conn = state.db.lock().unwrap();
+        for (ts, model, p, c) in [(1_790_337_600, "a", 10, 5), (1_790_424_000, "b", 20, 8)] {
+            db::insert(
+                &conn,
+                &db::Row {
+                    id: 0,
+                    ts,
+                    endpoint: "/v1/chat/completions".into(),
+                    model: model.into(),
+                    prompt_tokens: p,
+                    completion_tokens: c,
+                    reasoning_tokens: 0,
+                    total_tokens: p + c,
+                    stream: false,
+                    status: 200,
+                    duration_ms: 1,
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    let rows: Vec<serde_json::Value> =
+        reqwest::get(format!("{proxy}/api/requests?limit=1")).await.unwrap().json().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["model"], "b");
+
+    let agg: serde_json::Value =
+        reqwest::get(format!("{proxy}/api/aggregate?bucket=day")).await.unwrap().json().await.unwrap();
+    assert_eq!(agg["totals"]["requests"], 2);
+    assert_eq!(agg["totals"]["total"], 43);
+    assert_eq!(agg["buckets"].as_array().unwrap().len(), 2);
+
+    let agg_a: serde_json::Value =
+        reqwest::get(format!("{proxy}/api/aggregate?bucket=month&model=a")).await.unwrap().json().await.unwrap();
+    assert_eq!(agg_a["totals"]["requests"], 1);
+
+    let bad = reqwest::get(format!("{proxy}/api/aggregate?bucket=hour")).await.unwrap();
+    assert_eq!(bad.status(), 400);
+
+    let models: Vec<String> = reqwest::get(format!("{proxy}/api/models")).await.unwrap().json().await.unwrap();
+    assert_eq!(models, vec!["a", "b"]);
+
+    let html = reqwest::get(format!("{proxy}/dashboard")).await.unwrap();
+    assert_eq!(html.status(), 200);
+    assert!(html.headers()["content-type"].to_str().unwrap().starts_with("text/html"));
+}
