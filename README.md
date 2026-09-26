@@ -34,3 +34,22 @@ LM Studio currently reports zero token usage for `/v1/embeddings`, so embeddings
 LM Studio only reports usage on a stream when `stream_options.include_usage` is
 set. The proxy sets it, reads the final usage chunk, and drops that chunk again
 unless the client asked for it itself.
+
+## Run as a service
+
+    cargo build --release
+    sudo cp lms-stats.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now lms-stats
+    systemctl status lms-stats
+    journalctl -u lms-stats -f
+
+The unit runs the release binary from this checkout as user `shawon`, keeps
+the database in `/var/lib/lms-stats/`, and restarts on crash. After
+`cargo build --release` again, `sudo systemctl restart lms-stats` picks up
+the new binary. Edit the `Environment=` lines in the unit to change upstream,
+port or DB path.
+
+If LM Studio is down the proxy stays up and answers every request with
+`502` and a JSON error naming the upstream; those requests appear in the
+dashboard with status 502.

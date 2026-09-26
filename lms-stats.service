@@ -1,0 +1,18 @@
+[Unit]
+Description=lms-stats: token-counting proxy for LM Studio
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=shawon
+WorkingDirectory=/home/shawon/Projects/lms-stats
+ExecStart=/home/shawon/Projects/lms-stats/target/release/lms-stats
+Environment=LMS_UPSTREAM=http://192.168.0.166:1234
+Environment=LMS_LISTEN=0.0.0.0:1235
+Environment=LMS_DB=/var/lib/lms-stats/lms-stats.db
+StateDirectory=lms-stats
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
