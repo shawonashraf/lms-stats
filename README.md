@@ -1,7 +1,10 @@
 # lms-stats
 
-A tiny proxy in front of LM Studio that counts tokens per request and shows them
-on a dashboard. LM Studio does not expose per-request usage; this does.
+A small proxy in front of [LM Studio](https://lmstudio.ai) that counts tokens
+per request and shows them on a dashboard. LM Studio does not expose
+per-request usage anywhere; this does.
+
+Single Rust binary, SQLite file, no auth. Meant for a trusted LAN.
 
 ## Run
 
@@ -9,38 +12,83 @@ on a dashboard. LM Studio does not expose per-request usage; this does.
 
 Env vars (all optional):
 
-| Var            | Default                     |
-|----------------|-----------------------------|
-| `LMS_UPSTREAM` | `http://192.168.0.166:1234` |
-| `LMS_LISTEN`   | `0.0.0.0:1235`              |
-| `LMS_DB`       | `./lms-stats.db`            |
-
-`LMS_UPSTREAM` must be plain `http://`; the proxy is built without TLS.
+| Var            | Default                     | Meaning                              |
+|----------------|-----------------------------|--------------------------------------|
+| `LMS_UPSTREAM` | `http://192.168.0.166:1234` | LM Studio base URL, plain `http://` (built without TLS) |
+| `LMS_LISTEN`   | `0.0.0.0:1235`              | Proxy and dashboard bind address     |
+| `LMS_DB`       | `./lms-stats.db`            | SQLite file, created if missing      |
 
 Point your OpenAI-compatible clients at `http://<this-host>:1235/v1` instead of
-LM Studio. Everything is forwarded; `/v1/chat/completions`, `/v1/completions`
-and `/v1/embeddings` are counted.
+LM Studio. Every path and method is forwarded unchanged, including auth
+headers. Only these are counted:
 
-Dashboard: `http://<this-host>:1235/dashboard`
+- `POST /v1/chat/completions`
+- `POST /v1/completions`
+- `POST /v1/embeddings`
 
-Day, week (Monday-start), month and year buckets use the proxy host's local
-timezone. Range presets (today, 7 days, …) use the browser's timezone, so
-open the dashboard from a machine in the same timezone as the proxy for the
-two to line up.
+Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
+
+## Dashboard
+
+- Total tokens for the selected range, split into prompt, output and
+  reasoning. Output is `completion_tokens - reasoning_tokens`, because LM
+  Studio folds reasoning into `completion_tokens`.
+- Bucketed chart by day, week (Monday start), month or year, with presets for
+  today, 7 days, 30 days, this year, all time. Filter by model.
+- Per-request table, newest first, with "Load more" pagination. Rows with a
+  status of 400 or above are shown in red.
+- Refreshes every 15 seconds. Chart.js and the IBM Plex Sans font load from
+  CDNs; without internet the numbers and table still render, the chart does
+  not.
+
+Buckets use the proxy host's local timezone. Range presets use the browser's
+timezone, so open the dashboard from a machine in the same timezone as the
+proxy for the two to line up.
+
+## JSON API
+
+The dashboard is a static page over three endpoints you can use directly:
+
+| Endpoint | Query params | Returns |
+|---|---|---|
+| `GET /api/requests` | `limit` (1–500, default 50), `offset`, `model` | Array of rows, newest first |
+| `GET /api/aggregate` | `bucket` = `day` \| `week` \| `month` \| `year`, `from`, `to` (unix seconds), `model` | `{ totals, buckets }` |
+| `GET /api/models` | | Array of model ids seen so far |
+
+Row fields: `id, ts, endpoint, model, prompt_tokens, completion_tokens,
+reasoning_tokens, total_tokens, stream, status, duration_ms`.
 
 ## What is stored
 
 One row per counted request: timestamp, endpoint, model, prompt / completion /
-reasoning / total tokens, stream flag, upstream status, duration. Never prompts,
+reasoning / total tokens, stream flag, status, duration. Never prompts,
 responses, headers or client addresses.
 
-LM Studio currently reports zero token usage for `/v1/embeddings`, so embeddings rows show 0 tokens; the row is still recorded.
+The `status` column is the upstream HTTP status, except:
+
+| Status | Meaning |
+|---|---|
+| `502` | LM Studio unreachable, or its stream failed mid-way. Counts are 0. |
+| `499` | The client disconnected mid-stream. Counts are 0. |
+
+LM Studio currently reports zero token usage for `/v1/embeddings`, so
+embeddings rows show 0 tokens; the row is still recorded.
 
 ## How streaming is counted
 
-LM Studio only reports usage on a stream when `stream_options.include_usage` is
-set. The proxy sets it, reads the final usage chunk, and drops that chunk again
-unless the client asked for it itself.
+LM Studio only reports usage on a stream when `stream_options.include_usage`
+is set. The proxy sets it, reads the final usage chunk, and drops that chunk
+again unless the client asked for it itself, so older SDKs that index
+`choices[0]` are unaffected.
+
+## When LM Studio is down
+
+The proxy stays up and answers with `502` and an OpenAI-style JSON error:
+
+    {"error":{"message":"LM Studio at http://192.168.0.166:1234 is unavailable: ...","type":"upstream_unavailable"}}
+
+Counted requests appear in the dashboard with status 502; other paths are
+forwarded but not recorded.
 
 ## Run as a service
 
@@ -57,7 +105,11 @@ the database in `/var/lib/lms-stats/`, and restarts on crash. After
 the new binary. Edit the `Environment=` lines in the unit to change upstream,
 port or DB path.
 
-If LM Studio is down the proxy stays up and answers every request with
-`502` and a JSON error naming the upstream, and counted requests (chat,
-completions, embeddings) appear in the dashboard with status 502; other
-paths are forwarded but not recorded.
+## Development
+
+    cargo test                    # unit tests plus an integration test against a mock LM Studio
+    cargo clippy --all-targets
+
+Layout: `src/proxy.rs` forwards and records, `src/usage.rs` extracts usage
+from JSON and SSE streams, `src/db.rs` is the SQLite layer, `src/api.rs` the
+JSON routes, `static/dashboard.html` the page (embedded at build time).
