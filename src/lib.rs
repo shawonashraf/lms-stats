@@ -1,5 +1,6 @@
 pub mod api;
 pub mod db;
+pub mod live;
 pub mod proxy;
 pub mod usage;
 
@@ -10,6 +11,7 @@ pub struct AppState {
     pub upstream: String,
     pub client: reqwest::Client,
     pub db: Mutex<rusqlite::Connection>,
+    pub live: live::Live,
 }
 
 pub fn router(state: Arc<AppState>) -> axum::Router {

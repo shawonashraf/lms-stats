@@ -42,6 +42,8 @@ struct Counted {
     /// The client itself asked for `stream_options.include_usage`, so the usage
     /// chunk is forwarded rather than dropped.
     client_wanted_usage: bool,
+    /// Handle in the in-flight tracker; released by `record`.
+    live_id: u64,
 }
 
 pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
@@ -75,7 +77,8 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
                 body = serde_json::to_vec(&v).expect("re-serialize json");
             }
         }
-        counted = Some(Counted { model, stream, client_wanted_usage });
+        let live_id = state.live.start(ts, &path, &model, stream);
+        counted = Some(Counted { model, stream, client_wanted_usage, live_id });
     }
 
     let mut upstream = state.client.request(parts.method.clone(), format!("{}{}", state.upstream, path_and_query));
@@ -134,6 +137,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
             match item {
                 Ok(chunk) => {
                     let out = tap.feed(&chunk);
+                    state2.live.progress(c.live_id, tap.events);
                     if !out.is_empty() && tx.send(Ok(out.into())).await.is_err() {
                         outcome = StatusCode::from_u16(499).unwrap();
                         break; // client disconnected; dropping `upstream_body` aborts upstream
@@ -204,4 +208,5 @@ fn record(state: &AppState, ts: i64, endpoint: &str, c: &Counted, status: Status
     if let Err(e) = result {
         eprintln!("lms-stats: db insert failed: {e}");
     }
+    state.live.finish(c.live_id);
 }

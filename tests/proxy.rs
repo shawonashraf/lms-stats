@@ -8,6 +8,13 @@ data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"s
 data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16,\"completion_tokens_details\":{\"reasoning_tokens\":3}}}\n\n\
 data: [DONE]\n\n";
 
+/// The same stream as STREAM_BODY, split into pieces the "slow" mock sends 150 ms apart.
+const SLOW_PIECES: [&str; 3] = [
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n",
+    "data: {\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: {\"id\":\"x\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4,\"total_tokens\":16,\"completion_tokens_details\":{\"reasoning_tokens\":3}}}\n\ndata: [DONE]\n\n",
+];
+
 const JSON_BODY: &str = r#"{"id":"y","choices":[{"message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
 
 /// Mock LM Studio: records the last request body, answers streaming or JSON based on `stream`.
@@ -22,6 +29,19 @@ async fn mock_upstream(seen: Arc<Mutex<Vec<String>>>) -> String {
                     let text = String::from_utf8(bytes.to_vec()).unwrap();
                     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
                     seen.lock().unwrap().push(text);
+                    if v["model"] == "slow" {
+                        let slow = futures_util::stream::unfold(0usize, |i| async move {
+                            if i >= SLOW_PIECES.len() {
+                                return None;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                            Some((Ok::<_, std::io::Error>(bytes::Bytes::from(SLOW_PIECES[i])), i + 1))
+                        });
+                        return Response::builder()
+                            .header("content-type", "text/event-stream")
+                            .body(Body::from_stream(slow))
+                            .unwrap();
+                    }
                     if v["stream"].as_bool().unwrap_or(false) {
                         Response::builder()
                             .header("content-type", "text/event-stream")
@@ -58,6 +78,7 @@ async fn start(upstream: String) -> (String, Arc<AppState>) {
         upstream,
         client: reqwest::Client::new(),
         db: Mutex::new(db::open_memory().unwrap()),
+        live: lms_stats::live::Live::new(),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -260,4 +281,66 @@ async fn api_lists_and_aggregates() {
     let root = no_redirect.get(format!("{proxy}/")).send().await.unwrap();
     assert!(root.status().is_redirection(), "{}", root.status());
     assert_eq!(root.headers()["location"], "/dashboard");
+}
+
+#[tokio::test]
+async fn in_flight_stream_is_visible_in_active_and_events_then_recorded() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (proxy, state) = start(mock_upstream(seen).await).await;
+    let client = reqwest::Client::new();
+
+    // Before anything runs: no active requests, nothing completed.
+    let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
+    assert_eq!(snap["active"].as_array().unwrap().len(), 0);
+    assert_eq!(snap["completed"], 0);
+
+    // Fire a slow streamed request in the background.
+    let proxy2 = proxy.clone();
+    let client2 = client.clone();
+    let req = tokio::spawn(async move {
+        client2
+            .post(format!("{proxy2}/v1/chat/completions"))
+            .header("content-type", "application/json")
+            .body(r#"{"model":"slow","messages":[],"stream":true}"#)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap()
+    });
+
+    // While it streams, /api/active shows it with a growing chunk count.
+    let mut seen_progress = false;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
+        let active = snap["active"].as_array().unwrap();
+        if active.len() == 1 && active[0]["chunks"].as_u64().unwrap() >= 1 {
+            assert_eq!(active[0]["model"], "slow");
+            assert_eq!(active[0]["stream"], true);
+            assert!(active[0]["elapsed_ms"].as_u64().unwrap() > 0);
+            seen_progress = true;
+            break;
+        }
+    }
+    assert!(seen_progress, "never saw the in-flight request with chunks >= 1");
+
+    // /api/events is an SSE stream whose first event is a JSON snapshot.
+    let mut ev = client.get(format!("{proxy}/api/events")).send().await.unwrap();
+    assert!(ev.headers()["content-type"].to_str().unwrap().starts_with("text/event-stream"));
+    let first = ev.chunk().await.unwrap().unwrap();
+    let first = String::from_utf8(first.to_vec()).unwrap();
+    assert!(first.starts_with("data: "), "{first}");
+    let payload: serde_json::Value = serde_json::from_str(first.trim_start_matches("data: ").trim()).unwrap();
+    assert!(payload.get("active").is_some() && payload.get("completed").is_some());
+
+    // After it finishes: body intact (usage chunk stripped), row recorded, active empty, completed bumped.
+    let body = req.await.unwrap();
+    assert!(body.contains("\"content\":\"hi\"") && !body.contains("usage"));
+    let rows = wait_for_rows(&state, 1).await;
+    assert_eq!((rows[0].total_tokens, rows[0].stream, rows[0].status), (16, true, 200));
+    let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
+    assert_eq!(snap["active"].as_array().unwrap().len(), 0);
+    assert_eq!(snap["completed"], 1);
 }

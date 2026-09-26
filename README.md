@@ -37,9 +37,12 @@ Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
   today, 7 days, 30 days, this year, all time. Filter by model.
 - Per-request table, newest first, with "Load more" pagination. Rows with a
   status of 400 or above are shown in red.
-- Refreshes every 15 seconds. Chart.js and the IBM Plex Sans font load from
-  CDNs; without internet the numbers and table still render, the chart does
-  not.
+- Live: requests in flight show at the top of the table as a "generating"
+  row with a running token estimate (one streamed chunk is roughly one token)
+  and elapsed time, and the totals reload the moment a request finishes. The
+  page listens on `/api/events`; a 15-second poll is the fallback.
+- Chart.js and the IBM Plex Sans font load from CDNs; without internet the
+  numbers and table still render, the chart does not.
 
 Buckets use the proxy host's local timezone. Range presets use the browser's
 timezone, so open the dashboard from a machine in the same timezone as the
@@ -54,6 +57,8 @@ The dashboard is a static page over three endpoints you can use directly:
 | `GET /api/requests` | `limit` (1–500, default 50), `offset`, `model` | Array of rows, newest first |
 | `GET /api/aggregate` | `bucket` = `day` \| `week` \| `month` \| `year`, `from`, `to` (unix seconds), `model` | `{ totals, buckets }` |
 | `GET /api/models` | | Array of model ids seen so far |
+| `GET /api/active` | | `{ active: [...], completed }`: requests in flight (id, ts, endpoint, model, stream, chunks, elapsed_ms) and a count of rows written since start |
+| `GET /api/events` | | Server-sent events; each event is the same snapshot, sent on every request start/finish and once a second |
 
 Row fields: `id, ts, endpoint, model, prompt_tokens, completion_tokens,
 reasoning_tokens, total_tokens, stream, status, duration_ms`.

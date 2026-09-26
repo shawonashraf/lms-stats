@@ -1,15 +1,20 @@
+use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     Router,
     extract::{Query, State},
     http::StatusCode,
-    response::{Html, Json},
+    response::{
+        Html, Json,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::get,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{AppState, db};
+use crate::{AppState, db, live};
 
 type ApiError = (StatusCode, String);
 
@@ -20,6 +25,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/requests", get(requests))
         .route("/api/aggregate", get(aggregate))
         .route("/api/models", get(models))
+        .route("/api/active", get(active))
+        .route("/api/events", get(events))
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> ApiError {
@@ -88,4 +95,28 @@ async fn aggregate(
 async fn models(State(s): State<Arc<AppState>>) -> Result<Json<Vec<String>>, ApiError> {
     let conn = s.db.lock().map_err(internal)?;
     db::models(&conn).map(Json).map_err(internal)
+}
+
+async fn active(State(s): State<Arc<AppState>>) -> Json<live::Snapshot> {
+    Json(s.live.snapshot())
+}
+
+/// Server-sent events: a snapshot immediately, on every request start/finish,
+/// and once a second (so elapsed time and chunk counts tick while streaming).
+async fn events(State(s): State<Arc<AppState>>) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let rx = s.live.subscribe();
+    let ticker = tokio::time::interval(Duration::from_secs(1));
+    let stream = futures_util::stream::unfold((s, rx, ticker), |(s, mut rx, mut ticker)| async move {
+        tokio::select! {
+            r = rx.recv() => {
+                if matches!(r, Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                    return None;
+                }
+            }
+            _ = ticker.tick() => {}
+        }
+        let data = serde_json::to_string(&s.live.snapshot()).unwrap_or_else(|_| "{}".into());
+        Some((Ok(Event::default().data(data)), (s, rx, ticker)))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }

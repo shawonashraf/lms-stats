@@ -17,6 +17,7 @@ async fn main() {
         upstream: upstream.trim_end_matches('/').to_string(),
         client: reqwest::Client::new(),
         db: Mutex::new(conn),
+        live: lms_stats::live::Live::new(),
     });
 
     let listener = tokio::net::TcpListener::bind(&listen)

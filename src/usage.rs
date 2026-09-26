@@ -31,11 +31,13 @@ pub struct SseTap {
     buf: Vec<u8>,
     drop_usage_chunk: bool,
     pub usage: Option<Usage>,
+    /// `data:` chunks with a non-empty `choices`, i.e. content or finish events; ~tokens generated.
+    pub events: u64,
 }
 
 impl SseTap {
     pub fn new(drop_usage_chunk: bool) -> Self {
-        Self { buf: Vec::new(), drop_usage_chunk, usage: None }
+        Self { buf: Vec::new(), drop_usage_chunk, usage: None, events: 0 }
     }
 
     /// Feed incoming bytes; returns the bytes that should be forwarded to the client.
@@ -61,9 +63,12 @@ impl SseTap {
         let Some(payload) = line.strip_prefix(b"data:") else { return true };
         // `[DONE]` and anything non-JSON fails to parse and is forwarded as-is.
         let Ok(v) = serde_json::from_slice::<Value>(payload.trim_ascii()) else { return true };
+        let choices_empty = v.get("choices").and_then(Value::as_array).is_none_or(|a| a.is_empty());
+        if !choices_empty {
+            self.events += 1;
+        }
         let Some(u) = from_json(&v) else { return true };
         self.usage = Some(u);
-        let choices_empty = v.get("choices").and_then(Value::as_array).is_none_or(|a| a.is_empty());
         !(self.drop_usage_chunk && choices_empty)
     }
 }
@@ -129,6 +134,15 @@ mod tests {
         let mut tap = SseTap::new(true);
         assert_eq!(run(&mut tap, chunk, 1024), chunk);
         assert_eq!(tap.usage.map(|u| u.total), Some(2));
+    }
+
+    #[test]
+    fn tap_counts_content_events() {
+        let input = format!("{CHUNK1}{CHUNK2}{USAGE}{DONE}");
+        let mut tap = SseTap::new(true);
+        run(&mut tap, &input, 9);
+        // Two chunks carry choices (content delta + finish); the usage-only chunk and [DONE] do not.
+        assert_eq!(tap.events, 2);
     }
 
     #[test]

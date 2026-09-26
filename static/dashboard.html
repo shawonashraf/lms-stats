@@ -71,6 +71,8 @@
   td:nth-child(2) { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
   td.dim { color: var(--muted); }
   td.bad { color: var(--bad); font-weight: 500; }
+  tr.live td { color: var(--ink-2); }
+  tr.live td.status::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--reasoning); margin-right: 6px; vertical-align: 1px; }
   td.empty { color: var(--muted); text-align: left; padding: 24px 10px; white-space: normal; }
   .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; padding: 12px 0; }
 
@@ -124,6 +126,7 @@
         <th>prompt</th><th>output</th><th>reasoning</th><th>total</th>
         <th>stream</th><th>status</th><th>ms</th>
       </tr></thead>
+      <tbody id="live"></tbody>
       <tbody id="rows"></tbody>
     </table>
   </div>
@@ -263,6 +266,31 @@ $("#ranges").addEventListener("click", (e) => {
 $("#model").addEventListener("change", () => refresh());
 $("#more").addEventListener("click", () => loadRows(false));
 window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", loadAggregate);
+
+function renderLive(active) {
+  $("#live").innerHTML = active.map((a) => `<tr class="live">
+    <td>${new Date(a.ts * 1000).toLocaleString()}</td>
+    <td title="${esc(a.model)}">${esc(a.model || "\u2014")}</td>
+    <td>${esc(ENDPOINT_SHORT[a.endpoint] || a.endpoint)}</td>
+    <td>\u2026</td><td>\u2026</td><td>\u2026</td>
+    <td>${a.stream ? "~" + fmt(a.chunks) : "\u2026"}</td>
+    <td>${a.stream ? "streamed" : ""}</td>
+    <td class="status">generating</td>
+    <td>${fmt(Math.round(a.elapsed_ms / 1000))} s</td>
+  </tr>`).join("");
+}
+
+// Live updates: the server pushes a snapshot on every request start/finish and
+// once a second while anything is in flight. Completion triggers a reload; the
+// 15 s timer below is only a fallback if the event stream is unavailable.
+let completed = null;
+const events = new EventSource("/api/events");
+events.onmessage = (e) => {
+  const snap = JSON.parse(e.data);
+  renderLive(snap.active);
+  if (completed !== null && snap.completed !== completed) refresh(true);
+  completed = snap.completed;
+};
 
 refresh();
 setInterval(() => refresh(true), 15000);
