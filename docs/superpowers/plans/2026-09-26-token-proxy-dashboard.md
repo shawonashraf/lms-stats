@@ -16,7 +16,7 @@
 - Counted endpoints, POST only: `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. Everything else is forwarded untouched and not recorded.
 - Never store prompts, responses, headers, API keys or client IPs.
 - Dependencies limited to: axum, tokio, reqwest, rusqlite, serde, serde_json, futures-util, bytes (plus dev-only: none).
-- Commit style: imperative subject line, body explains why, end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+- Commit style: imperative subject line, body explains why. No AI co-author or attribution trailers.
 - Run `cargo test` before every commit. All tests must pass.
 
 ## File structure
@@ -223,9 +223,7 @@ git add Cargo.toml Cargo.lock .gitignore src/lib.rs src/main.rs src/db.rs src/ap
 git commit -m "Scaffold axum server with env config and SQLite schema
 
 Establishes the single-binary layout (lib + thin main) so integration
-tests can build the router, and creates the requests table on startup.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+tests can build the router, and creates the requests table on startup."
 ```
 
 ---
@@ -561,9 +559,7 @@ git add src/db.rs
 git commit -m "Add request storage with list and bucketed aggregate queries
 
 Bucketing is done in SQLite via strftime on localtime so day/week/month/
-year all share one query; totals are summed from the buckets.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+year all share one query; totals are summed from the buckets."
 ```
 
 ---
@@ -750,9 +746,7 @@ git commit -m "Add usage extraction and SSE tap for streamed responses
 
 LM Studio only reports usage on streams when stream_options.include_usage
 is set, so the proxy will inject it; the tap captures the usage chunk and
-can drop it for clients that never asked (older SDKs index choices[0]).
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+can drop it for clients that never asked (older SDKs index choices[0])."
 ```
 
 ---
@@ -1166,9 +1160,7 @@ requests get include_usage injected and the usage-only chunk is stripped
 again unless the client asked for it. Rows are written after the response
 finishes so a failed request still shows up with zero counts, and an
 unreachable LM Studio answers with an OpenAI-style JSON error plus a
-status-502 row.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+status-502 row."
 ```
 
 ---
@@ -1365,9 +1357,7 @@ git add src/api.rs static/dashboard.html tests/proxy.rs
 git commit -m "Add dashboard JSON API for requests, aggregates and models
 
 Thin handlers over the db module; bucket size is validated to a 400 so
-the UI gets a clear error instead of a SQL failure.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+the UI gets a clear error instead of a SQL failure."
 ```
 
 ---
@@ -1618,9 +1608,7 @@ git commit -m "Add dashboard page with totals, bucketed chart and request table
 
 Vanilla JS over the JSON API; Chart.js from cdnjs. Output tokens are
 shown as completion minus reasoning since LM Studio folds reasoning
-into completion_tokens.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+into completion_tokens."
 ```
 
 ---
@@ -1686,9 +1674,7 @@ Record the actual numbers observed in the commit message body.
 
 ```bash
 git add README.md
-git commit -m "Add README with run instructions and verification notes
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+git commit -m "Add README with run instructions and verification notes"
 ```
 
 ---
@@ -1769,7 +1755,5 @@ git commit -m "Add systemd unit for running the proxy as a service
 
 Runs the release binary with Restart=always and keeps the DB under
 /var/lib/lms-stats so it survives cargo clean. Install is documented,
-not automated.
-
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
+not automated."
 ```
