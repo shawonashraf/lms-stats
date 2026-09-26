@@ -15,11 +15,18 @@ Env vars (all optional):
 | `LMS_LISTEN`   | `0.0.0.0:1235`              |
 | `LMS_DB`       | `./lms-stats.db`            |
 
+`LMS_UPSTREAM` must be plain `http://`; the proxy is built without TLS.
+
 Point your OpenAI-compatible clients at `http://<this-host>:1235/v1` instead of
 LM Studio. Everything is forwarded; `/v1/chat/completions`, `/v1/completions`
 and `/v1/embeddings` are counted.
 
 Dashboard: `http://<this-host>:1235/dashboard`
+
+Day, week (Monday-start), month and year buckets use the proxy host's local
+timezone. Range presets (today, 7 days, …) use the browser's timezone, so
+open the dashboard from a machine in the same timezone as the proxy for the
+two to line up.
 
 ## What is stored
 
@@ -51,5 +58,6 @@ the new binary. Edit the `Environment=` lines in the unit to change upstream,
 port or DB path.
 
 If LM Studio is down the proxy stays up and answers every request with
-`502` and a JSON error naming the upstream; those requests appear in the
-dashboard with status 502.
+`502` and a JSON error naming the upstream, and counted requests (chat,
+completions, embeddings) appear in the dashboard with status 502; other
+paths are forwarded but not recorded.
