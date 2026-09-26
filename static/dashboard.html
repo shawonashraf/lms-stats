@@ -199,11 +199,20 @@ async function loadAggregate() {
     { label: "reasoning", data: data.buckets.map((b) => b.reasoning), backgroundColor: css("--reasoning") },
   ];
   if (window.Chart) {
-    if (chart) chart.destroy();
+    const datasets = series.map((s) => ({ ...s, borderWidth: 1, borderColor: css("--page"), borderRadius: 3, borderSkipped: false, maxBarThickness: 36 }));
+    if (chart) {
+      // Update in place: rebuilding the chart replays its entry animation on every refresh.
+      chart.data.labels = labels;
+      chart.data.datasets = datasets;
+      chart.update("none");
+      $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
+      return;
+    }
     chart = new Chart($("#chart"), {
       type: "bar",
-      data: { labels, datasets: series.map((s) => ({ ...s, borderWidth: 1, borderColor: css("--page"), borderRadius: 3, borderSkipped: false, maxBarThickness: 36 })) },
+      data: { labels, datasets },
       options: {
+        animation: false,
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
@@ -265,7 +274,11 @@ $("#ranges").addEventListener("click", (e) => {
 });
 $("#model").addEventListener("change", () => refresh());
 $("#more").addEventListener("click", () => loadRows(false));
-window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", loadAggregate);
+window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
+  // Axis and border colours are read once at creation; rebuild on a theme change.
+  if (chart) { chart.destroy(); chart = null; }
+  loadAggregate();
+});
 
 function renderLive(active) {
   $("#live").innerHTML = active.map((a) => `<tr class="live">
