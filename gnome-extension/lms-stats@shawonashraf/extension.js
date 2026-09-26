@@ -36,13 +36,13 @@ function periodStarts() {
 
 const Indicator = GObject.registerClass(
 class Indicator extends PanelMenu.Button {
-    _init(session) {
+    _init(session, iconPath) {
         super._init(0.0, 'lms-stats');
         this._session = session;
         this._destroyed = false;
 
         const box = new St.BoxLayout({style_class: 'panel-status-menu-box'});
-        box.add_child(new St.Icon({icon_name: 'utilities-system-monitor-symbolic', style_class: 'system-status-icon'}));
+        box.add_child(new St.Icon({gicon: Gio.icon_new_for_string(iconPath), style_class: 'system-status-icon'}));
         this._label = new St.Label({text: '—', y_align: Clutter.ActorAlign.CENTER});
         box.add_child(this._label);
         this.add_child(box);
@@ -129,7 +129,7 @@ class Indicator extends PanelMenu.Button {
 export default class LmsStatsExtension extends Extension {
     enable() {
         this._session = new Soup.Session({timeout: 5});
-        this._indicator = new Indicator(this._session);
+        this._indicator = new Indicator(this._session, `${this.path}/icons/lms-stats-symbolic.svg`);
         Main.panel.addToStatusArea(this.uuid, this._indicator);
         this._indicator.refresh();
         this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, REFRESH_SECONDS, () => {
