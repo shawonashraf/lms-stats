@@ -30,7 +30,7 @@ Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
 
 ## Dashboard
 
-~[dashboard screenshot](./dashboard.png)
+![dashboard screenshot](./dashboard.png)
 
 - Total tokens for the selected range, split into prompt, output and
   reasoning. Output is `completion_tokens - reasoning_tokens`, because LM
