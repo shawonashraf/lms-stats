@@ -38,7 +38,10 @@ Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
 - Bucketed chart by day, week (Monday start), month or year, with presets for
   today, 7 days, 30 days, this year, all time. Filter by model.
 - Per-request table, newest first, with "Load more" pagination. Rows with a
-  status of 400 or above are shown in red.
+  status of 400 or above are shown in red. The `tok/s` column is generation
+  speed: completion tokens over the time after the first streamed chunk
+  arrived, which excludes prompt processing. Buffered (non-streamed) requests
+  have no first-chunk time, so their figure is end-to-end and shown muted.
 - Live: requests in flight show at the top of the table as a "generating"
   row with a running token estimate (one streamed chunk is roughly one token)
   and elapsed time, and the totals reload the moment a request finishes. The
@@ -63,12 +66,13 @@ The dashboard is a static page over three endpoints you can use directly:
 | `GET /api/events` | | Server-sent events; each event is the same snapshot, sent on every request start/finish and once a second |
 
 Row fields: `id, ts, endpoint, model, prompt_tokens, completion_tokens,
-reasoning_tokens, total_tokens, stream, status, duration_ms`.
+reasoning_tokens, total_tokens, stream, status, duration_ms, ttft_ms` (`ttft_ms`
+is null for buffered responses).
 
 ## What is stored
 
 One row per counted request: timestamp, endpoint, model, prompt / completion /
-reasoning / total tokens, stream flag, status, duration. Never prompts,
+reasoning / total tokens, stream flag, status, duration, time to first chunk. Never prompts,
 responses, headers or client addresses.
 
 The `status` column is the upstream HTTP status, except:

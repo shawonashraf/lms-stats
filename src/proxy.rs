@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::{
     body::Body,
@@ -92,7 +92,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         Err(e) => {
             // Make outages visible on the dashboard: one zero-count row with status 502.
             if let Some(c) = &counted {
-                record(&state, ts, &path, c, StatusCode::BAD_GATEWAY, started, None);
+                record(&state, ts, &path, c, StatusCode::BAD_GATEWAY, started, None, None);
             }
             return unavailable(&state.upstream, &e);
         }
@@ -113,12 +113,12 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                record(&state, ts, &path, &c, StatusCode::BAD_GATEWAY, started, None);
+                record(&state, ts, &path, &c, StatusCode::BAD_GATEWAY, started, None, None);
                 return (StatusCode::BAD_GATEWAY, format!("upstream body error: {e}")).into_response();
             }
         };
         let found = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| usage::from_json(&v));
-        record(&state, ts, &path, &c, status, started, found);
+        record(&state, ts, &path, &c, status, started, found, None);
         return build(status, headers, Body::from(bytes));
     }
 
@@ -133,11 +133,16 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         // stream ends abnormally: 499 (client closed request) if the client
         // went away, 502 (bad gateway) if the upstream stream itself errored.
         let mut outcome = status;
+        // Time to first content chunk, for generation speed = completion / (duration - ttft).
+        let mut ttft: Option<Duration> = None;
         while let Some(item) = upstream_body.next().await {
             match item {
                 Ok(chunk) => {
                     let out = tap.feed(&chunk);
                     state2.live.progress(c.live_id, tap.events);
+                    if ttft.is_none() && tap.events > 0 {
+                        ttft = Some(started.elapsed());
+                    }
                     if !out.is_empty() && tx.send(Ok(out.into())).await.is_err() {
                         outcome = StatusCode::from_u16(499).unwrap();
                         break; // client disconnected; dropping `upstream_body` aborts upstream
@@ -154,7 +159,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         if !rest.is_empty() {
             let _ = tx.send(Ok(rest.into())).await;
         }
-        record(&state2, ts, &path, &c, outcome, started, tap.usage);
+        record(&state2, ts, &path, &c, outcome, started, tap.usage, ttft);
     });
     let client_body = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
     build(status, headers, Body::from_stream(client_body))
@@ -185,7 +190,17 @@ fn build(status: StatusCode, headers: HeaderMap, body: Body) -> Response {
     r
 }
 
-fn record(state: &AppState, ts: i64, endpoint: &str, c: &Counted, status: StatusCode, started: Instant, found: Option<Usage>) {
+#[allow(clippy::too_many_arguments)]
+fn record(
+    state: &AppState,
+    ts: i64,
+    endpoint: &str,
+    c: &Counted,
+    status: StatusCode,
+    started: Instant,
+    found: Option<Usage>,
+    ttft: Option<Duration>,
+) {
     let u = found.unwrap_or_default();
     let row = db::Row {
         id: 0,
@@ -199,6 +214,7 @@ fn record(state: &AppState, ts: i64, endpoint: &str, c: &Counted, status: Status
         stream: c.stream,
         status: status.as_u16(),
         duration_ms: started.elapsed().as_millis() as i64,
+        ttft_ms: ttft.map(|d| d.as_millis() as i64),
     };
     // ponytail: std Mutex held for one INSERT; move to a writer task if the lock ever shows up in profiles.
     let result = match state.db.lock() {

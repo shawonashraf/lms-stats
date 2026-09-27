@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS requests (
   total_tokens      INTEGER NOT NULL,
   stream            INTEGER NOT NULL,
   status            INTEGER NOT NULL,
-  duration_ms       INTEGER NOT NULL
+  duration_ms       INTEGER NOT NULL,
+  ttft_ms           INTEGER
 );
 CREATE INDEX IF NOT EXISTS requests_ts ON requests(ts);
 ";
@@ -33,6 +34,9 @@ pub struct Row {
     pub stream: bool,
     pub status: u16,
     pub duration_ms: i64,
+    /// Time to first streamed content chunk; None for buffered responses and rows
+    /// recorded before this column existed.
+    pub ttft_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -85,23 +89,35 @@ impl BucketSize {
 
 pub fn open(path: &str) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
-    conn.busy_timeout(std::time::Duration::from_secs(2))?;
-    conn.execute_batch(SCHEMA)?;
+    init(&conn)?;
     Ok(conn)
 }
 
 pub fn open_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
+    init(&conn)?;
+    Ok(conn)
+}
+
+/// Create the schema and apply the one migration so far: databases created
+/// before `ttft_ms` existed get the column added (NULL for old rows).
+fn init(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.execute_batch(SCHEMA)?;
-    Ok(conn)
+    let has_ttft = conn
+        .prepare("SELECT 1 FROM pragma_table_info('requests') WHERE name = 'ttft_ms'")?
+        .exists([])?;
+    if !has_ttft {
+        conn.execute_batch("ALTER TABLE requests ADD COLUMN ttft_ms INTEGER")?;
+    }
+    Ok(())
 }
 
 pub fn insert(conn: &Connection, r: &Row) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO requests (ts, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens,
-                               total_tokens, stream, status, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                               total_tokens, stream, status, duration_ms, ttft_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             r.ts,
             r.endpoint,
@@ -112,7 +128,8 @@ pub fn insert(conn: &Connection, r: &Row) -> rusqlite::Result<()> {
             r.total_tokens,
             r.stream as i64,
             r.status as i64,
-            r.duration_ms
+            r.duration_ms,
+            r.ttft_ms
         ],
     )?;
     Ok(())
@@ -121,7 +138,7 @@ pub fn insert(conn: &Connection, r: &Row) -> rusqlite::Result<()> {
 pub fn list(conn: &Connection, limit: i64, offset: i64, model: Option<&str>) -> rusqlite::Result<Vec<Row>> {
     let mut stmt = conn.prepare(
         "SELECT id, ts, endpoint, model, prompt_tokens, completion_tokens, reasoning_tokens,
-                total_tokens, stream, status, duration_ms
+                total_tokens, stream, status, duration_ms, ttft_ms
          FROM requests
          WHERE (?1 IS NULL OR model = ?1)
          ORDER BY id DESC
@@ -140,6 +157,7 @@ pub fn list(conn: &Connection, limit: i64, offset: i64, model: Option<&str>) -> 
             stream: r.get::<_, i64>(8)? != 0,
             status: r.get::<_, i64>(9)? as u16,
             duration_ms: r.get(10)?,
+            ttft_ms: r.get(11)?,
         })
     })?;
     rows.collect()
@@ -215,6 +233,7 @@ mod tests {
             stream: false,
             status: 200,
             duration_ms: 10,
+            ttft_ms: None,
         }
     }
 
@@ -274,6 +293,29 @@ mod tests {
 
         let (totals, _) = aggregate(&c, BucketSize::Day, 0, i64::MAX, Some("b")).unwrap();
         assert_eq!(totals, Totals { requests: 1, prompt: 20, completion: 8, reasoning: 0, total: 28 });
+    }
+
+    #[test]
+    fn ttft_roundtrips_and_old_databases_are_migrated() {
+        // A database created before ttft_ms existed: same table without the column.
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE requests (id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, endpoint TEXT NOT NULL,
+             model TEXT NOT NULL, prompt_tokens INTEGER NOT NULL, completion_tokens INTEGER NOT NULL,
+             reasoning_tokens INTEGER NOT NULL, total_tokens INTEGER NOT NULL, stream INTEGER NOT NULL,
+             status INTEGER NOT NULL, duration_ms INTEGER NOT NULL);
+             INSERT INTO requests VALUES (1, 1790337600, '/v1/chat/completions', 'old', 1, 2, 0, 3, 1, 200, 500);",
+        )
+        .unwrap();
+        init(&c).unwrap();
+        let old = list(&c, 10, 0, None).unwrap();
+        assert_eq!(old[0].ttft_ms, None, "pre-migration rows read back as None");
+
+        let mut r = row(DAY1, "a", 10, 5, 2);
+        r.ttft_ms = Some(120);
+        insert(&c, &r).unwrap();
+        assert_eq!(list(&c, 1, 0, None).unwrap()[0].ttft_ms, Some(120));
+        init(&c).unwrap(); // idempotent
     }
 
     #[test]

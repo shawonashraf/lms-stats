@@ -124,7 +124,7 @@
       <thead><tr>
         <th>time</th><th>model</th><th>endpoint</th>
         <th>prompt</th><th>output</th><th>reasoning</th><th>total</th>
-        <th>stream</th><th>status</th><th>ms</th>
+        <th>stream</th><th>status</th><th>ms</th><th>tok/s</th>
       </tr></thead>
       <tbody id="live"></tbody>
       <tbody id="rows"></tbody>
@@ -229,11 +229,21 @@ async function loadAggregate() {
   $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
 }
 
+// Generation speed excludes prompt processing when the proxy saw the first
+// streamed chunk; otherwise it's end-to-end and shown muted.
+function speedCell(r) {
+  if (!r.completion_tokens || !r.duration_ms) return '<td class="dim">\u2014</td>';
+  const gen = r.ttft_ms != null && r.duration_ms > r.ttft_ms;
+  const secs = (gen ? r.duration_ms - r.ttft_ms : r.duration_ms) / 1000;
+  const tps = (r.completion_tokens / secs).toFixed(1);
+  return gen ? `<td>${tps}</td>` : `<td class="dim" title="end-to-end, no time-to-first-token">${tps}</td>`;
+}
+
 async function loadRows(reset) {
   if (reset) { offset = 0; $("#rows").innerHTML = ""; }
   const rows = await (await fetch(`/api/requests?${qs({ limit: PAGE, offset })}`)).json();
   if (reset && rows.length === 0) {
-    $("#rows").innerHTML = '<tr><td colspan="10" class="empty">No requests recorded yet. Point a client at this proxy\'s /v1 and they will appear here.</td></tr>';
+    $("#rows").innerHTML = '<tr><td colspan="11" class="empty">No requests recorded yet. Point a client at this proxy\'s /v1 and they will appear here.</td></tr>';
   }
   offset += rows.length;
   $("#rows").insertAdjacentHTML("beforeend", rows.map((r) => `<tr>
@@ -244,6 +254,7 @@ async function loadRows(reset) {
     <td>${fmt(r.reasoning_tokens)}</td><td>${fmt(r.total_tokens)}</td>
     <td class="dim">${r.stream ? "streamed" : ""}</td>
     <td class="${r.status >= 400 ? "bad" : "dim"}">${r.status}</td><td class="dim">${fmt(r.duration_ms)}</td>
+    ${speedCell(r)}
   </tr>`).join(""));
   $("#count").textContent = offset ? `${fmt(offset)} shown` : "";
   $("#more").hidden = rows.length < PAGE;
@@ -290,6 +301,7 @@ function renderLive(active) {
     <td>${a.stream ? "streamed" : ""}</td>
     <td class="status">generating</td>
     <td>${fmt(Math.round(a.elapsed_ms / 1000))} s</td>
+    <td>\u2026</td>
   </tr>`).join("");
 }
 

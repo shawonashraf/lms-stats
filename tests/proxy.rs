@@ -117,6 +117,7 @@ async fn non_streaming_request_is_forwarded_and_recorded() {
     let r = &rows[0];
     assert_eq!((r.model.as_str(), r.endpoint.as_str(), r.stream, r.status), ("m1", "/v1/chat/completions", false, 200));
     assert_eq!((r.prompt_tokens, r.completion_tokens, r.reasoning_tokens, r.total_tokens), (5, 2, 0, 7));
+    assert_eq!(r.ttft_ms, None, "no first-token time for a buffered response");
 }
 
 #[tokio::test]
@@ -144,6 +145,8 @@ async fn streaming_request_injects_include_usage_and_strips_usage_chunk() {
     let r = &rows[0];
     assert!(r.stream);
     assert_eq!((r.prompt_tokens, r.completion_tokens, r.reasoning_tokens, r.total_tokens), (12, 4, 3, 16));
+    let ttft = r.ttft_ms.expect("streamed response records time to first token");
+    assert!(ttft <= r.duration_ms, "ttft {ttft} > duration {}", r.duration_ms);
 }
 
 #[tokio::test]
@@ -246,6 +249,7 @@ async fn api_lists_and_aggregates() {
                     stream: false,
                     status: 200,
                     duration_ms: 1,
+                    ttft_ms: None,
                 },
             )
             .unwrap();
@@ -340,6 +344,9 @@ async fn in_flight_stream_is_visible_in_active_and_events_then_recorded() {
     assert!(body.contains("\"content\":\"hi\"") && !body.contains("usage"));
     let rows = wait_for_rows(&state, 1).await;
     assert_eq!((rows[0].total_tokens, rows[0].stream, rows[0].status), (16, true, 200));
+    // The slow mock waits 150 ms before its first chunk, so ttft reflects real waiting.
+    let ttft = rows[0].ttft_ms.unwrap();
+    assert!((140..=rows[0].duration_ms).contains(&ttft), "ttft {ttft} ms, duration {} ms", rows[0].duration_ms);
     let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
     assert_eq!(snap["active"].as_array().unwrap().len(), 0);
     assert_eq!(snap["completed"], 1);
