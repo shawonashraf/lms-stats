@@ -1,8 +1,9 @@
 # lms-stats
 
-A small proxy in front of [LM Studio](https://lmstudio.ai) that counts tokens
-per request and shows them on a dashboard. LM Studio does not expose
-per-request usage anywhere; this does.
+A small proxy in front of one or more [LM Studio](https://lmstudio.ai)
+instances that counts tokens per request and shows them on a dashboard. LM
+Studio does not expose per-request usage anywhere; this does. With several
+instances, requests are routed to whichever one has the requested model.
 
 Single Rust binary, SQLite file, no auth. Meant for a trusted LAN.
 
@@ -14,7 +15,7 @@ Env vars (all optional):
 
 | Var            | Default                     | Meaning                              |
 |----------------|-----------------------------|--------------------------------------|
-| `LMS_UPSTREAM` | `http://192.168.0.166:1234` | LM Studio base URL, plain `http://` (built without TLS) |
+| `LMS_UPSTREAM` | `http://192.168.0.166:1234,http://192.168.0.163:1234` | LM Studio base URLs, comma-separated, plain `http://` (built without TLS) |
 | `LMS_LISTEN`   | `0.0.0.0:1235`              | Proxy and dashboard bind address     |
 | `LMS_DB`       | `./lms-stats.db`            | SQLite file, created if missing      |
 
@@ -27,6 +28,17 @@ headers. Only these are counted:
 - `POST /v1/embeddings`
 
 Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
+
+## Several LM Studio instances
+
+With more than one URL in `LMS_UPSTREAM`, every counted request first asks each
+instance for `GET /v1/models` (2-second timeout, in parallel) and goes to the
+first instance that lists the request's `model`. Nothing is cached, so a model
+that was just downloaded or unloaded is picked up on the next request. If no
+instance lists the model, or none answers, the request goes to the first URL
+and LM Studio returns its own error. `GET /v1/models` through the proxy
+returns the lists of all instances concatenated, so clients see every model.
+Every other path goes to the first URL.
 
 ## Dashboard
 

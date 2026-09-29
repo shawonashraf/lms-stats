@@ -74,8 +74,12 @@ async fn mock_upstream(seen: Arc<Mutex<Vec<String>>>) -> String {
 }
 
 async fn start(upstream: String) -> (String, Arc<AppState>) {
+    start_multi(vec![upstream]).await
+}
+
+async fn start_multi(upstreams: Vec<String>) -> (String, Arc<AppState>) {
     let state = Arc::new(AppState {
-        upstream,
+        upstreams,
         client: reqwest::Client::new(),
         db: Mutex::new(db::open_memory().unwrap()),
         live: lms_stats::live::Live::new(),
@@ -350,4 +354,71 @@ async fn in_flight_stream_is_visible_in_active_and_events_then_recorded() {
     let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
     assert_eq!(snap["active"].as_array().unwrap().len(), 0);
     assert_eq!(snap["completed"], 1);
+}
+
+/// Mock LM Studio that advertises exactly one model and records the id of every
+/// chat request it receives.
+async fn mock_serving(model: &'static str, seen: Arc<Mutex<Vec<String>>>) -> String {
+    let app = Router::new()
+        .route(
+            "/v1/models",
+            axum::routing::get(move || async move { axum::Json(serde_json::json!({"object":"list","data":[{"id":model}]})) }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(move |req: Request| async move {
+                let bytes = axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                seen.lock().unwrap().push(v["model"].as_str().unwrap().to_string());
+                Response::builder().header("content-type", "application/json").body(Body::from(JSON_BODY)).unwrap()
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+async fn two_upstreams() -> (String, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
+    let seen_a = Arc::new(Mutex::new(Vec::new()));
+    let seen_b = Arc::new(Mutex::new(Vec::new()));
+    let a = mock_serving("model-a", seen_a.clone()).await;
+    let b = mock_serving("model-b", seen_b.clone()).await;
+    let (proxy, _) = start_multi(vec![a, b]).await;
+    (proxy, seen_a, seen_b)
+}
+
+async fn chat(proxy: &str, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .body(format!(r#"{{"model":"{model}","messages":[]}}"#))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn request_is_routed_to_the_upstream_that_serves_the_model() {
+    let (proxy, seen_a, seen_b) = two_upstreams().await;
+    assert_eq!(chat(&proxy, "model-b").await.status(), 200);
+    assert!(seen_a.lock().unwrap().is_empty(), "first upstream got a request for model-b");
+    assert_eq!(*seen_b.lock().unwrap(), vec!["model-b"]);
+}
+
+#[tokio::test]
+async fn unknown_model_goes_to_first_upstream() {
+    let (proxy, seen_a, seen_b) = two_upstreams().await;
+    assert_eq!(chat(&proxy, "nope").await.status(), 200);
+    assert_eq!(*seen_a.lock().unwrap(), vec!["nope"]);
+    assert!(seen_b.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn models_list_is_merged_across_upstreams() {
+    let (proxy, _, _) = two_upstreams().await;
+    let v: serde_json::Value = reqwest::get(format!("{proxy}/v1/models")).await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = v["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["model-a", "model-b"]);
+    assert_eq!(v["object"], "list");
 }
