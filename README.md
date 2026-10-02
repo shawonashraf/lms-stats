@@ -128,6 +128,34 @@ the database in `/var/lib/lms-stats/`, and restarts on crash. After
 the new binary. Edit the `Environment=` lines in the unit to change upstream,
 port or DB path.
 
+### Windows service
+
+On Windows, `install-service.ps1` registers the release binary as a native
+service, the counterpart of the unit above. The binary itself speaks the
+Windows service protocol when started with the `run-as-service` argument the
+script passes:
+
+    cargo build --release
+    powershell -ExecutionPolicy Bypass -File install-service.ps1
+
+The script asks for administrator rights once (UAC), starts the service at
+boot, and restarts it on crash. Defaults, all overridable:
+
+    powershell -ExecutionPolicy Bypass -File install-service.ps1 -Upstream "http://192.168.0.166:1234,http://192.168.0.163:1234" -Listen "0.0.0.0:1235" -DbPath "D:\data\lms-stats.db"
+
+| Setting  | Default                                |
+|----------|----------------------------------------|
+| Upstream | `http://127.0.0.1:1234`                |
+| Listen   | `0.0.0.0:1235`                         |
+| Database | `C:\ProgramData\lms-stats\lms-stats.db`|
+| Log      | `C:\ProgramData\lms-stats\service.log` |
+
+The settings are stored per service in the registry (`Environment` value
+under `HKLM\SYSTEM\CurrentControlSet\Services\lms-stats`), so the service does
+not depend on any user profile. `sc.exe stop|start|query lms-stats` needs an
+elevated shell; the dashboard does not. Remove with `uninstall-service.ps1`;
+the database and log are kept.
+
 ## GNOME Shell extension
 
 `gnome-extension/lms-stats@shawonashraf/` adds a top-bar indicator: the
