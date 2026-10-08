@@ -178,6 +178,35 @@ not depend on any user profile. `sc.exe stop|start|query lms-stats` needs an
 elevated shell; the dashboard does not. Remove with `uninstall-service.ps1`;
 the database and log are kept.
 
+### macOS LaunchAgent
+
+On macOS, `install-service.sh` registers the release binary as a per-user
+LaunchAgent, the counterpart of the unit above. It runs as you, starts at
+login, and restarts on crash:
+
+    cargo build --release
+    ./install-service.sh
+
+Settings are environment variables when running the script, all optional:
+
+    LMS_LISTEN=0.0.0.0:1235 LMS_BACKUP_DIR= ./install-service.sh
+
+| Setting  | Default                                                    |
+|----------|------------------------------------------------------------|
+| Upstream | `http://192.168.0.166:1234,http://192.168.0.163:1234`      |
+| Listen   | `0.0.0.0:1235`                                             |
+| Database | `~/Library/Application Support/lms-stats/lms-stats.db`     |
+| Backups  | `~/Documents/lms-stats` (`LMS_BACKUP_DIR=` to turn off)    |
+| Log      | `~/Library/Logs/lms-stats.log`                             |
+
+The script writes `~/Library/LaunchAgents/com.shawonashraf.lms-stats.plist`
+with absolute paths and the settings baked in, so the agent does not depend on
+a shell profile. Running it again replaces a running agent, which is also how
+to pick up a new binary after `cargo build --release`. Check or control it
+with `launchctl print gui/$(id -u)/com.shawonashraf.lms-stats` and
+`launchctl kickstart -k gui/$(id -u)/com.shawonashraf.lms-stats` (restart).
+Remove with `./uninstall-service.sh`; the database and log are kept.
+
 ## GNOME Shell extension
 
 `gnome-extension/lms-stats@shawonashraf/` adds a top-bar indicator: the
