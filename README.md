@@ -18,6 +18,7 @@ Env vars (all optional):
 | `LMS_UPSTREAM` | `http://192.168.0.166:1234,http://192.168.0.163:1234` | LM Studio base URLs, comma-separated, plain `http://` (built without TLS) |
 | `LMS_LISTEN`   | `0.0.0.0:1235`              | Proxy and dashboard bind address     |
 | `LMS_DB`       | `./lms-stats.db`            | SQLite file, created if missing      |
+| `LMS_BACKUP_DIR` | `~/Documents/lms-stats`   | Weekly snapshots of the database (see [Backups](#backups)); set to empty to disable |
 
 Point your OpenAI-compatible clients at `http://<this-host>:1235/v1` instead of
 LM Studio. Every path and method is forwarded unchanged, including auth
@@ -97,6 +98,20 @@ The `status` column is the upstream HTTP status, except:
 LM Studio currently reports zero token usage for `/v1/embeddings`, so
 embeddings rows show 0 tokens; the row is still recorded.
 
+## Backups
+
+The proxy copies the database to `LMS_BACKUP_DIR` (default
+`Documents/lms-stats` in the home directory of the user running it) once a
+week, as `lms-stats-YYYY-MM-DD.db`, and keeps the newest 5. It checks at
+startup and then hourly: if the newest snapshot is 7 or more days old, or
+there is none, it writes a new one with SQLite's `VACUUM INTO`, which gives a
+consistent copy while requests are being recorded. Older snapshots beyond 5
+are deleted; any other files in the directory are left alone. Failures are
+logged and retried on the next hourly check.
+
+Each snapshot is a complete database. To restore, stop the proxy and copy a
+snapshot over the `LMS_DB` file.
+
 ## How streaming is counted
 
 LM Studio only reports usage on a stream when `stream_options.include_usage`
@@ -123,7 +138,8 @@ forwarded but not recorded.
     journalctl -u lms-stats -f
 
 The unit runs the release binary from this checkout as user `shawon`, keeps
-the database in `/var/lib/lms-stats/`, and restarts on crash. After
+the database in `/var/lib/lms-stats/`, backs it up to
+`/home/shawon/Documents/lms-stats/`, and restarts on crash. After
 `cargo build --release` again, `sudo systemctl restart lms-stats` picks up
 the new binary. Edit the `Environment=` lines in the unit to change upstream,
 port or DB path.
@@ -148,7 +164,13 @@ boot, and restarts it on crash. Defaults, all overridable:
 | Upstream | `http://127.0.0.1:1234`                |
 | Listen   | `0.0.0.0:1235`                         |
 | Database | `C:\ProgramData\lms-stats\lms-stats.db`|
+| Backups  | your `Documents\lms-stats` (`-BackupDir`, or `-NoBackup` to turn off) |
 | Log      | `C:\ProgramData\lms-stats\service.log` |
+
+The service runs as LocalSystem, which has no Documents folder of its own, so
+the script resolves yours before asking for admin rights and stores it as
+`LMS_BACKUP_DIR`. A service installed before backups existed takes none until
+the script is run again.
 
 The settings are stored per service in the registry (`Environment` value
 under `HKLM\SYSTEM\CurrentControlSet\Services\lms-stats`), so the service does

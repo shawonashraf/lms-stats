@@ -17,7 +17,7 @@ use windows_service::service_control_handler::{self, ServiceControlHandlerResult
 use windows_service::service_dispatcher;
 use windows_service::{Result, define_windows_service};
 
-use crate::{DEFAULT_UPSTREAM, env_or, serve};
+use crate::{DEFAULT_UPSTREAM, backup_dir, env_or, serve};
 
 const SERVICE_NAME: &str = "lms-stats";
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -61,11 +61,14 @@ fn run_service() -> Result<()> {
     let upstream = env_or("LMS_UPSTREAM", DEFAULT_UPSTREAM);
     let listen = env_or("LMS_LISTEN", "0.0.0.0:1235");
     let db_path = env_or("LMS_DB", &default_db_path());
+    // The service account's Documents folder is not the user's, so there is
+    // no default here; install-service.ps1 sets LMS_BACKUP_DIR.
+    let backup_dir = backup_dir(None);
 
     if let Some(parent) = std::path::Path::new(&db_path).parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    log(&format!("starting: listen {listen}, upstream {upstream}, db {db_path}"));
+    log("starting");
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
     let (done_tx, done_rx) =
@@ -111,6 +114,8 @@ fn run_service() -> Result<()> {
                 upstream,
                 listen,
                 db_path,
+                backup_dir,
+                log,
                 async move {
                     let _ = shutdown_rx.changed().await;
                 },

@@ -5,13 +5,19 @@
 #   powershell -ExecutionPolicy Bypass -File install-service.ps1
 #
 # Optional parameters:
-#   -Upstream "http://127.0.0.1:1234,http://192.168.0.163:1234"
+#   -Upstream "http://192.168.0.166:1234,http://192.168.0.163:1234"
 #   -Listen   "0.0.0.0:1235"
 #   -DbPath   "C:\ProgramData\lms-stats\lms-stats.db"
+#   -BackupDir "D:\backups\lms-stats"   (default: your Documents\lms-stats)
+#   -NoBackup                           (no weekly snapshots)
 param(
-    [string]$Upstream = "http://127.0.0.1:1234",
+    [string]$Upstream = "http://192.168.0.166:1234,http://192.168.0.163:1234",
     [string]$Listen = "0.0.0.0:1235",
-    [string]$DbPath = ""
+    [string]$DbPath = "",
+    # Resolved here, before elevation, so it is the invoking user's Documents
+    # folder (OneDrive redirection included), not the admin's or the service's.
+    [string]$BackupDir = (Join-Path ([Environment]::GetFolderPath("MyDocuments")) "lms-stats"),
+    [switch]$NoBackup
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +32,7 @@ if (-not (Test-Admin)) {
     Write-Host "Requesting administrator rights (UAC)..."
     $args_ = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Upstream `"$Upstream`" -Listen `"$Listen`""
     if ($DbPath) { $args_ += " -DbPath `"$DbPath`"" }
+    if ($NoBackup) { $args_ += " -NoBackup" } else { $args_ += " -BackupDir `"$BackupDir`"" }
     Start-Process powershell -Verb RunAs -ArgumentList $args_ -Wait
     exit $?
 }
@@ -60,9 +67,11 @@ sc.exe description $ServiceName "lms-stats: token-counting proxy for LM Studio" 
 
 # Per-service environment, read by the service process instead of a shell
 # profile. This is the Windows counterpart of the unit's Environment= lines.
+# Without LMS_BACKUP_DIR the service takes no backups.
+$serviceEnv = @("LMS_UPSTREAM=$Upstream", "LMS_LISTEN=$Listen", "LMS_DB=$DbPath")
+if (-not $NoBackup) { $serviceEnv += "LMS_BACKUP_DIR=$BackupDir" }
 New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" `
-    -Name Environment -PropertyType MultiString -Force `
-    -Value @("LMS_UPSTREAM=$Upstream", "LMS_LISTEN=$Listen", "LMS_DB=$DbPath") | Out-Null
+    -Name Environment -PropertyType MultiString -Force -Value $serviceEnv | Out-Null
 
 # Restart on crash, like Restart=always / RestartSec=3 in the unit file.
 sc.exe failure $ServiceName reset= 86400 actions= restart/3000/restart/10000/restart/30000 | Out-Null
@@ -75,5 +84,6 @@ Write-Host "Service $ServiceName is running." -ForegroundColor Green
 Write-Host "  Upstream : $Upstream"
 Write-Host "  Listening: $Listen"
 Write-Host "  Database : $DbPath"
+Write-Host "  Backups  : $(if ($NoBackup) { 'disabled' } else { "$BackupDir (weekly, newest 5 kept)" })"
 Write-Host "  Log      : $(Join-Path $env:ProgramData 'lms-stats\service.log')"
 Write-Host "  Dashboard: http://localhost:1235/dashboard"
