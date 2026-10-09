@@ -29,6 +29,10 @@ async fn mock_upstream(seen: Arc<Mutex<Vec<String>>>) -> String {
                     let text = String::from_utf8(bytes.to_vec()).unwrap();
                     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
                     seen.lock().unwrap().push(text);
+                    if v["model"] == "hang" {
+                        // A generation that outlives any client's patience.
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    }
                     if v["model"] == "slow" {
                         let slow = futures_util::stream::unfold(0usize, |i| async move {
                             if i >= SLOW_PIECES.len() {
@@ -351,6 +355,33 @@ async fn in_flight_stream_is_visible_in_active_and_events_then_recorded() {
     // The slow mock waits 150 ms before its first chunk, so ttft reflects real waiting.
     let ttft = rows[0].ttft_ms.unwrap();
     assert!((140..=rows[0].duration_ms).contains(&ttft), "ttft {ttft} ms, duration {} ms", rows[0].duration_ms);
+    let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
+    assert_eq!(snap["active"].as_array().unwrap().len(), 0);
+    assert_eq!(snap["completed"], 1);
+}
+
+#[tokio::test]
+async fn client_that_gives_up_before_the_response_is_recorded_as_499_and_leaves_active() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (proxy, state) = start(mock_upstream(seen).await).await;
+
+    // A non-streaming request whose client times out (like a 30 s SDK timeout
+    // on a slow 27B completion) while the proxy is still waiting for upstream
+    // headers. hyper drops the handler future when the client disconnects.
+    let err = reqwest::Client::new()
+        .post(format!("{proxy}/v1/chat/completions"))
+        .header("content-type", "application/json")
+        .timeout(std::time::Duration::from_millis(200))
+        .body(r#"{"model":"hang","messages":[]}"#)
+        .send()
+        .await
+        .unwrap_err();
+    assert!(err.is_timeout(), "{err}");
+
+    // Well before the mock's 10 s answer: one 499 row, nothing left in flight.
+    let rows = wait_for_rows(&state, 1).await;
+    assert_eq!((rows[0].status, rows[0].stream, rows[0].total_tokens, rows[0].model.as_str()), (499, false, 0, "hang"));
+    assert!(rows[0].duration_ms < 5_000, "duration {} ms", rows[0].duration_ms);
     let snap: serde_json::Value = reqwest::get(format!("{proxy}/api/active")).await.unwrap().json().await.unwrap();
     assert_eq!(snap["active"].as_array().unwrap().len(), 0);
     assert_eq!(snap["completed"], 1);

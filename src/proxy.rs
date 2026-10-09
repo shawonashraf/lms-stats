@@ -38,8 +38,18 @@ const SKIP_HEADERS: &[&str] = &[
     "accept-encoding",
 ];
 
-/// What we learned from a counted request body.
+/// A counted request from body parse to row insert. Exactly one row is written
+/// per instance: by `record`, or by `Drop` as a 499 (client closed request)
+/// when nothing recorded it. hyper drops the handler future the moment the
+/// client disconnects, so a client that gives up while the proxy is still
+/// waiting for upstream headers (a 30 s SDK timeout on a slow non-streaming
+/// completion, say) would otherwise leave the in-flight entry on the dashboard
+/// forever and write no row at all.
 struct Counted {
+    state: Arc<AppState>,
+    ts: i64,
+    endpoint: String,
+    started: Instant,
     model: String,
     stream: bool,
     /// The client itself asked for `stream_options.include_usage`, so the usage
@@ -47,6 +57,50 @@ struct Counted {
     client_wanted_usage: bool,
     /// Handle in the in-flight tracker; released by `record`.
     live_id: u64,
+    recorded: bool,
+}
+
+impl Counted {
+    /// Write the row and release the in-flight entry.
+    fn record(mut self, status: StatusCode, found: Option<Usage>, ttft: Option<Duration>) {
+        self.recorded = true;
+        self.insert(status, found, ttft);
+    }
+
+    fn insert(&self, status: StatusCode, found: Option<Usage>, ttft: Option<Duration>) {
+        let u = found.unwrap_or_default();
+        let row = db::Row {
+            id: 0,
+            ts: self.ts,
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            prompt_tokens: u.prompt,
+            completion_tokens: u.completion,
+            reasoning_tokens: u.reasoning,
+            total_tokens: u.total,
+            stream: self.stream,
+            status: status.as_u16(),
+            duration_ms: self.started.elapsed().as_millis() as i64,
+            ttft_ms: ttft.map(|d| d.as_millis() as i64),
+        };
+        // ponytail: std Mutex held for one INSERT; move to a writer task if the lock ever shows up in profiles.
+        let result = match self.state.db.lock() {
+            Ok(conn) => db::insert(&conn, &row).map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = result {
+            eprintln!("lms-stats: db insert failed: {e}");
+        }
+        self.state.live.finish(self.live_id);
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        if !self.recorded {
+            self.insert(StatusCode::from_u16(499).unwrap(), None, None);
+        }
+    }
 }
 
 pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Response {
@@ -86,7 +140,17 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
             }
         }
         let live_id = state.live.start(ts, &path, &model, stream);
-        counted = Some(Counted { model, stream, client_wanted_usage, live_id });
+        counted = Some(Counted {
+            state: state.clone(),
+            ts,
+            endpoint: path.clone(),
+            started,
+            model,
+            stream,
+            client_wanted_usage,
+            live_id,
+            recorded: false,
+        });
     }
 
     let base = match &counted {
@@ -103,8 +167,8 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         Ok(r) => r,
         Err(e) => {
             // Make outages visible on the dashboard: one zero-count row with status 502.
-            if let Some(c) = &counted {
-                record(&state, ts, &path, c, StatusCode::BAD_GATEWAY, started, None, None);
+            if let Some(c) = counted {
+                c.record(StatusCode::BAD_GATEWAY, None, None);
             }
             return unavailable(base, &e);
         }
@@ -125,19 +189,18 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                record(&state, ts, &path, &c, StatusCode::BAD_GATEWAY, started, None, None);
+                c.record(StatusCode::BAD_GATEWAY, None, None);
                 return (StatusCode::BAD_GATEWAY, format!("upstream body error: {e}")).into_response();
             }
         };
         let found = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| usage::from_json(&v));
-        record(&state, ts, &path, &c, status, started, found, None);
+        c.record(status, found, None);
         return build(status, headers, Body::from(bytes));
     }
 
     // Streaming: forward chunks through the tap as they arrive; record once the
     // upstream stream ends (or the client goes away).
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
-    let state2 = state.clone();
     tokio::spawn(async move {
         let mut tap = SseTap::new(!c.client_wanted_usage);
         let mut upstream_body = resp.bytes_stream();
@@ -151,7 +214,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
             match item {
                 Ok(chunk) => {
                     let out = tap.feed(&chunk);
-                    state2.live.progress(c.live_id, tap.events);
+                    c.state.live.progress(c.live_id, tap.events);
                     if ttft.is_none() && tap.events > 0 {
                         ttft = Some(started.elapsed());
                     }
@@ -171,7 +234,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         if !rest.is_empty() {
             let _ = tx.send(Ok(rest.into())).await;
         }
-        record(&state2, ts, &path, &c, outcome, started, tap.usage, ttft);
+        c.record(outcome, tap.usage, ttft);
     });
     let client_body = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
     build(status, headers, Body::from_stream(client_body))
@@ -230,41 +293,4 @@ fn build(status: StatusCode, headers: HeaderMap, body: Body) -> Response {
     *r.status_mut() = status;
     *r.headers_mut() = headers;
     r
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record(
-    state: &AppState,
-    ts: i64,
-    endpoint: &str,
-    c: &Counted,
-    status: StatusCode,
-    started: Instant,
-    found: Option<Usage>,
-    ttft: Option<Duration>,
-) {
-    let u = found.unwrap_or_default();
-    let row = db::Row {
-        id: 0,
-        ts,
-        endpoint: endpoint.to_string(),
-        model: c.model.clone(),
-        prompt_tokens: u.prompt,
-        completion_tokens: u.completion,
-        reasoning_tokens: u.reasoning,
-        total_tokens: u.total,
-        stream: c.stream,
-        status: status.as_u16(),
-        duration_ms: started.elapsed().as_millis() as i64,
-        ttft_ms: ttft.map(|d| d.as_millis() as i64),
-    };
-    // ponytail: std Mutex held for one INSERT; move to a writer task if the lock ever shows up in profiles.
-    let result = match state.db.lock() {
-        Ok(conn) => db::insert(&conn, &row).map_err(|e| e.to_string()),
-        Err(e) => Err(e.to_string()),
-    };
-    if let Err(e) = result {
-        eprintln!("lms-stats: db insert failed: {e}");
-    }
-    state.live.finish(c.live_id);
 }
