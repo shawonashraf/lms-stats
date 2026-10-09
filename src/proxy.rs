@@ -270,8 +270,9 @@ async fn models_of_each(state: &AppState) -> Vec<Vec<Value>> {
         .collect()
 }
 
-/// OpenAI-style error body so SDK clients surface a readable message instead of a bare 502.
-fn unavailable(upstream: &str, err: &reqwest::Error) -> Response {
+/// `err` and every cause below it, colon-separated: reqwest's top-level message
+/// alone ("error sending request") says nothing about why.
+pub fn error_chain(err: &reqwest::Error) -> String {
     let mut cause = err.to_string();
     let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
     while let Some(e) = source {
@@ -279,6 +280,12 @@ fn unavailable(upstream: &str, err: &reqwest::Error) -> Response {
         cause.push_str(&e.to_string());
         source = e.source();
     }
+    cause
+}
+
+/// OpenAI-style error body so SDK clients surface a readable message instead of a bare 502.
+fn unavailable(upstream: &str, err: &reqwest::Error) -> Response {
+    let cause = error_chain(err);
     let body = serde_json::json!({
         "error": {
             "message": format!("LM Studio at {upstream} is unavailable: {cause}"),

@@ -76,6 +76,19 @@
   td.empty { color: var(--muted); text-align: left; padding: 24px 10px; white-space: normal; }
   .foot { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; padding: 12px 0; }
 
+  .tabs { display: flex; gap: 4px; padding-top: 12px; }
+  .tabs button { border: 0; color: var(--ink-2); }
+  .tabs button.active { background: var(--panel); color: var(--ink); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line); }
+
+  .admin-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 0 6px; color: var(--muted); font-size: 12px; }
+  .upstream h2 { margin: 22px 0 0; font-size: 13px; font-weight: 500; color: var(--ink-2); white-space: normal; }
+  .upstream h2 .err { color: var(--bad); font-weight: 400; margin-left: 10px; }
+  .upstream .tablewrap { margin-top: 8px; }
+  td.actions input { width: 90px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin-right: 6px; }
+  td.actions input::placeholder { color: var(--muted); }
+  button:disabled, input:disabled { opacity: 0.5; cursor: default; }
+  td.state { white-space: normal; max-width: 320px; }
+
   @media (prefers-reduced-motion: reduce) { .bar span { transition: none; } }
   @media (max-width: 520px) { .hero-num { font-size: 40px; } select { margin-left: 0; } }
 </style>
@@ -86,7 +99,12 @@
     <h1>lms-stats<span>token usage via proxy</span></h1>
     <span id="updated"></span>
   </header>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button data-tab="usage" class="active" role="tab" aria-selected="true">usage</button>
+    <button data-tab="admin" role="tab" aria-selected="false">admin</button>
+  </nav>
 
+  <div id="tab-usage">
   <section class="hero">
     <div class="hero-row">
       <div class="hero-num"><span id="total">0</span><small>tokens</small></div>
@@ -131,6 +149,15 @@
     </table>
   </div>
   <div class="foot"><span id="count"></span><button id="more">Load more</button></div>
+  </div>
+
+  <div id="tab-admin" hidden>
+    <div class="admin-bar">
+      <span>Models on each LM Studio instance. Loading takes as long as LM Studio needs; the row stays busy until it answers.</span>
+      <span><span id="admin-status"></span> <button id="admin-refresh">Refresh</button></span>
+    </div>
+    <div id="admin"></div>
+  </div>
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js" integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
@@ -316,6 +343,104 @@ events.onmessage = (e) => {
   if (completed !== null && snap.completed !== completed) refresh(true);
   completed = snap.completed;
 };
+
+// Admin tab: model list per upstream from LM Studio's native REST API, with
+// load/unload. Rows with an action in flight survive re-renders via `pending`.
+const gb = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
+const pending = new Map();
+
+function showTab(name) {
+  document.querySelectorAll("#tabs button").forEach((b) => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-selected", on);
+  });
+  $("#tab-usage").hidden = name !== "usage";
+  $("#tab-admin").hidden = name !== "admin";
+  if (name === "admin") loadAdmin();
+}
+
+function modelRow(url, m) {
+  const inst = (m.loaded_instances || [])[0];
+  const key = `${url}|${m.key}`;
+  const busy = pending.get(key);
+  const dis = busy ? "disabled" : "";
+  const state = busy ? busy : inst ? `loaded, ctx ${fmt(inst.config?.context_length ?? 0)}` : '<span class="dim">not loaded</span>';
+  const actions = inst
+    ? `<button data-act="unload" data-url="${esc(url)}" data-instance="${esc(inst.id)}" data-key="${esc(m.key)}" ${dis}>Unload</button>`
+    : `<input type="number" min="1" step="1024" placeholder="ctx" aria-label="context length" ${dis}>` +
+      `<button data-act="load" data-url="${esc(url)}" data-model="${esc(m.key)}" data-key="${esc(m.key)}" ${dis}>Load</button>`;
+  return `<tr>
+    <td title="${esc(m.display_name || "")}">${esc(m.key)}</td>
+    <td class="dim">${esc(m.type || "")}</td>
+    <td class="dim">${esc(m.params_string || "")}</td>
+    <td class="dim">${m.size_bytes ? gb(m.size_bytes) : ""}</td>
+    <td class="dim">${m.max_context_length ? fmt(m.max_context_length) : ""}</td>
+    <td class="state">${state}</td>
+    <td class="actions">${actions}</td>
+  </tr>`;
+}
+
+function renderAdmin(upstreams) {
+  $("#admin").innerHTML = upstreams.map((u) => `<section class="upstream">
+    <h2>${esc(u.url)}${u.error ? `<span class="err">${esc(u.error)}</span>` : ""}</h2>
+    <div class="tablewrap"><table>
+      <thead><tr><th>model</th><th>type</th><th>params</th><th>size</th><th>max ctx</th><th>status</th><th></th></tr></thead>
+      <tbody>${u.models.length ? u.models.map((m) => modelRow(u.url, m)).join("")
+        : `<tr><td colspan="7" class="empty">${u.error ? "Unreachable, or an LM Studio older than 0.4 without the v1 API." : "No models downloaded."}</td></tr>`}</tbody>
+    </table></div>
+  </section>`).join("");
+}
+
+async function loadAdmin() {
+  $("#admin-status").textContent = "loading…";
+  try {
+    const data = await (await fetch("/api/admin/models")).json();
+    renderAdmin(data.upstreams);
+    $("#admin-status").textContent = `updated ${new Date().toLocaleTimeString()}`;
+  } catch (e) {
+    $("#admin-status").textContent = "update failed: " + (e && e.message ? e.message : e);
+  }
+}
+
+async function adminAction(b) {
+  const row = b.closest("tr");
+  const body = { upstream: b.dataset.url };
+  let path;
+  if (b.dataset.act === "load") {
+    path = "/api/admin/load";
+    body.model = b.dataset.model;
+    const ctx = Number(row.querySelector("input").value);
+    if (ctx > 0) body.context_length = ctx;
+  } else {
+    path = "/api/admin/unload";
+    body.instance_id = b.dataset.instance;
+  }
+  const key = `${b.dataset.url}|${b.dataset.key}`;
+  pending.set(key, b.dataset.act === "load" ? "loading…" : "unloading…");
+  row.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
+  row.querySelector(".state").textContent = pending.get(key);
+  try {
+    const r = await fetch(path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const text = await r.text();
+    if (!r.ok) {
+      let msg = text;
+      try { const j = JSON.parse(text); msg = j.error?.message || j.error || text; } catch (_) { /* not JSON */ }
+      throw new Error(`${r.status}: ${msg}`);
+    }
+    pending.delete(key);
+    await loadAdmin();
+  } catch (e) {
+    pending.delete(key);
+    await loadAdmin();
+    const cell = [...document.querySelectorAll("#admin button[data-key]")].find((x) => x.dataset.url === body.upstream && x.dataset.key === b.dataset.key)?.closest("tr")?.querySelector(".state");
+    if (cell) { cell.textContent = e.message; cell.classList.add("bad"); }
+  }
+}
+
+$("#tabs").addEventListener("click", (e) => { const b = e.target.closest("button"); if (b) showTab(b.dataset.tab); });
+$("#admin-refresh").addEventListener("click", () => loadAdmin());
+$("#admin").addEventListener("click", (e) => { const b = e.target.closest("button[data-act]"); if (b) adminAction(b); });
 
 refresh();
 setInterval(() => refresh(true), 15000);

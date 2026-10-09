@@ -15,7 +15,7 @@ Env vars (all optional):
 
 | Var            | Default                     | Meaning                              |
 |----------------|-----------------------------|--------------------------------------|
-| `LMS_UPSTREAM` | `http://192.168.0.166:1234,http://192.168.0.163:1234` | LM Studio base URLs, comma-separated, plain `http://` (built without TLS) |
+| `LMS_UPSTREAM` | `http://192.168.0.166:1234` | LM Studio base URLs, comma-separated, plain `http://` (built without TLS) |
 | `LMS_LISTEN`   | `0.0.0.0:1235`              | Proxy and dashboard bind address     |
 | `LMS_DB`       | `./lms-stats.db`            | SQLite file, created if missing      |
 | `LMS_BACKUP_DIR` | `~/Documents/lms-stats`   | Weekly snapshots of the database (see [Backups](#backups)); set to empty to disable |
@@ -61,6 +61,13 @@ Every other path goes to the first URL.
   page listens on `/api/events`; a 15-second poll is the fallback.
 - Chart.js and the IBM Plex Sans font load from CDNs; without internet the
   numbers and table still render, the chart does not.
+- Admin tab: every model downloaded on each LM Studio instance with its
+  loaded state and context length, and a Load (optional context length) or
+  Unload button per model. This uses LM Studio's native REST API
+  (`/api/v1/models`, `/api/v1/models/load`, `/api/v1/models/unload`), so the
+  upstream must run LM Studio 0.4 or newer; an older one shows as
+  unreachable. Anyone who can open the dashboard can load and unload, the
+  same as anyone who can reach LM Studio's own port.
 
 Buckets use the proxy host's local timezone. Range presets use the browser's
 timezone, so open the dashboard from a machine in the same timezone as the
@@ -77,6 +84,9 @@ The dashboard is a static page over three endpoints you can use directly:
 | `GET /api/models` | | Array of model ids seen so far |
 | `GET /api/active` | | `{ active: [...], completed }`: requests in flight (id, ts, endpoint, model, stream, chunks, elapsed_ms) and a count of rows written since start |
 | `GET /api/events` | | Server-sent events; each event is the same snapshot, sent on every request start/finish and once a second |
+| `GET /api/admin/models` | | `{ upstreams: [{ url, models, error }] }`: LM Studio's `/api/v1/models` entries per upstream, or an `error` string for one that is down |
+| `POST /api/admin/load` | JSON body `{ upstream, model, context_length? }` | LM Studio's load response, with its status; 400 if `upstream` is not one of `LMS_UPSTREAM`, 502 if it cannot be reached |
+| `POST /api/admin/unload` | JSON body `{ upstream, instance_id }` | LM Studio's unload response, same error handling |
 
 Row fields: `id, ts, endpoint, model, prompt_tokens, completion_tokens,
 reasoning_tokens, total_tokens, stream, status, duration_ms, ttft_ms` (`ttft_ms`
@@ -157,7 +167,7 @@ script passes:
 The script asks for administrator rights once (UAC), starts the service at
 boot, and restarts it on crash. Defaults, all overridable:
 
-    powershell -ExecutionPolicy Bypass -File install-service.ps1 -Upstream "http://192.168.0.166:1234,http://192.168.0.163:1234" -Listen "0.0.0.0:1235" -DbPath "D:\data\lms-stats.db"
+    powershell -ExecutionPolicy Bypass -File install-service.ps1 -Upstream "http://192.168.0.166:1234" -Listen "0.0.0.0:1235" -DbPath "D:\data\lms-stats.db"
 
 | Setting  | Default                                |
 |----------|----------------------------------------|
@@ -193,7 +203,7 @@ Settings are environment variables when running the script, all optional:
 
 | Setting  | Default                                                    |
 |----------|------------------------------------------------------------|
-| Upstream | `http://192.168.0.166:1234,http://192.168.0.163:1234`      |
+| Upstream | `http://192.168.0.166:1234`                                |
 | Listen   | `0.0.0.0:1235`                                             |
 | Database | `~/Library/Application Support/lms-stats/lms-stats.db`     |
 | Backups  | `~/Documents/lms-stats` (`LMS_BACKUP_DIR=` to turn off)    |

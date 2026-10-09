@@ -15,6 +15,7 @@ is not obvious from the code.
 - `src/proxy.rs` forwards and records, `src/usage.rs` extracts usage from JSON
   and SSE streams, `src/db.rs` is the SQLite layer, `src/api.rs` the JSON
   routes, `src/live.rs` in-flight tracking and the SSE change channel,
+  `src/admin.rs` model load/unload through LM Studio's native `/api/v1` REST API,
   `src/backup.rs` weekly snapshots, `src/service.rs` the Windows service entry.
 - `static/dashboard.html` is embedded at build time; rebuild after editing it.
 - `docs/superpowers/` holds specs and plans from earlier work.

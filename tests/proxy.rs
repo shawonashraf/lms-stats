@@ -453,3 +453,156 @@ async fn models_list_is_merged_across_upstreams() {
     assert_eq!(ids, vec!["model-a", "model-b"]);
     assert_eq!(v["object"], "list");
 }
+
+const ADMIN_MODELS: &str = r#"{"models":[
+  {"type":"llm","publisher":"qwen","key":"qwen/qwen3.8-27b","display_name":"Qwen3.8 27B","params_string":"27B",
+   "size_bytes":17000000000,"max_context_length":131072,"format":"gguf",
+   "loaded_instances":[{"id":"qwen/qwen3.8-27b","config":{"context_length":8192}}]},
+  {"type":"embedding","publisher":"nomic","key":"text-embedding-nomic-embed-text-v1.5","display_name":"Nomic Embed",
+   "params_string":null,"size_bytes":84000000,"max_context_length":2048,"format":"gguf","loaded_instances":[]}
+]}"#;
+
+/// Mock LM Studio 0.4 native REST API: lists models, records load/unload bodies.
+async fn mock_admin(seen: Arc<Mutex<Vec<String>>>) -> String {
+    let seen2 = seen.clone();
+    let app = Router::new()
+        .route(
+            "/api/v1/models",
+            axum::routing::get(|| async {
+                Response::builder().header("content-type", "application/json").body(Body::from(ADMIN_MODELS)).unwrap()
+            }),
+        )
+        .route(
+            "/api/v1/models/load",
+            post(move |req: Request| {
+                let seen = seen.clone();
+                async move {
+                    let bytes = axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
+                    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    seen.lock().unwrap().push(format!("load {v}"));
+                    if v["model"] == "missing" {
+                        return Response::builder()
+                            .status(404)
+                            .header("content-type", "application/json")
+                            .body(Body::from(r#"{"error":"Model not found: missing"}"#))
+                            .unwrap();
+                    }
+                    let body = serde_json::json!({
+                        "type":"llm","instance_id":v["model"],"load_time_seconds":1.5,"status":"loaded"
+                    });
+                    Response::builder()
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap()
+                }
+            }),
+        )
+        .route(
+            "/api/v1/models/unload",
+            post(move |req: Request| {
+                let seen = seen2.clone();
+                async move {
+                    let bytes = axum::body::to_bytes(req.into_body(), usize::MAX).await.unwrap();
+                    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    seen.lock().unwrap().push(format!("unload {v}"));
+                    axum::Json(serde_json::json!({"instance_id": v["instance_id"]}))
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}")
+}
+
+/// Proxy in front of one admin-capable mock and one upstream nobody listens on.
+async fn admin_setup() -> (String, String, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let up = mock_admin(seen.clone()).await;
+    let (proxy, _) = start_multi(vec![up.clone(), "http://127.0.0.1:1".to_string()]).await;
+    (proxy, up, seen)
+}
+
+async fn admin_post(proxy: &str, path: &str, body: serde_json::Value) -> reqwest::Response {
+    reqwest::Client::new().post(format!("{proxy}{path}")).json(&body).send().await.unwrap()
+}
+
+#[tokio::test]
+async fn admin_models_lists_each_upstream_and_reports_the_down_one() {
+    let (proxy, up, _) = admin_setup().await;
+    let v: serde_json::Value = reqwest::get(format!("{proxy}/api/admin/models")).await.unwrap().json().await.unwrap();
+    let ups = v["upstreams"].as_array().unwrap();
+    assert_eq!(ups.len(), 2);
+
+    assert_eq!(ups[0]["url"], up);
+    assert!(ups[0]["error"].is_null(), "{}", ups[0]);
+    let models = ups[0]["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["key"], "qwen/qwen3.8-27b");
+    assert_eq!(models[0]["loaded_instances"][0]["config"]["context_length"], 8192);
+    assert_eq!(models[1]["loaded_instances"].as_array().unwrap().len(), 0);
+
+    assert_eq!(ups[1]["url"], "http://127.0.0.1:1");
+    assert!(ups[1]["error"].as_str().unwrap().contains("127.0.0.1:1"), "{}", ups[1]);
+    assert_eq!(ups[1]["models"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn admin_load_forwards_model_and_context_length_to_the_named_upstream() {
+    let (proxy, up, seen) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/load", serde_json::json!({
+        "upstream": up, "model": "qwen/qwen3.6-35b-a3b", "context_length": 16384
+    }))
+    .await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!((v["instance_id"].as_str(), v["status"].as_str()), (Some("qwen/qwen3.6-35b-a3b"), Some("loaded")));
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![r#"load {"context_length":16384,"model":"qwen/qwen3.6-35b-a3b"}"#.to_string()]
+    );
+}
+
+#[tokio::test]
+async fn admin_load_without_context_length_omits_the_field() {
+    let (proxy, up, seen) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/load", serde_json::json!({"upstream": up, "model": "m"})).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(*seen.lock().unwrap(), vec![r#"load {"model":"m"}"#.to_string()]);
+}
+
+#[tokio::test]
+async fn admin_load_passes_the_upstream_error_through() {
+    let (proxy, up, _) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/load", serde_json::json!({"upstream": up, "model": "missing"})).await;
+    assert_eq!(resp.status(), 404);
+    assert!(resp.text().await.unwrap().contains("Model not found: missing"));
+}
+
+#[tokio::test]
+async fn admin_unload_forwards_the_instance_id() {
+    let (proxy, up, seen) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/unload", serde_json::json!({"upstream": up, "instance_id": "qwen/qwen3.8-27b"})).await;
+    assert_eq!(resp.status(), 200);
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["instance_id"], "qwen/qwen3.8-27b");
+    assert_eq!(*seen.lock().unwrap(), vec![r#"unload {"instance_id":"qwen/qwen3.8-27b"}"#.to_string()]);
+}
+
+#[tokio::test]
+async fn admin_rejects_an_upstream_that_is_not_configured() {
+    let (proxy, _, seen) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/load", serde_json::json!({"upstream": "http://evil:1234", "model": "m"})).await;
+    assert_eq!(resp.status(), 400);
+    let resp = admin_post(&proxy, "/api/admin/unload", serde_json::json!({"upstream": "http://evil:1234", "instance_id": "m"})).await;
+    assert_eq!(resp.status(), 400);
+    assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn admin_reports_a_down_upstream_on_load_as_502() {
+    let (proxy, _, _) = admin_setup().await;
+    let resp = admin_post(&proxy, "/api/admin/load", serde_json::json!({"upstream": "http://127.0.0.1:1", "model": "m"})).await;
+    assert_eq!(resp.status(), 502);
+    assert!(resp.text().await.unwrap().contains("127.0.0.1:1"));
+}

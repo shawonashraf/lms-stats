@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod api;
 pub mod backup;
 pub mod db;
@@ -19,6 +20,7 @@ pub struct AppState {
 pub fn router(state: Arc<AppState>) -> axum::Router {
     axum::Router::new()
         .merge(api::router())
+        .merge(admin::router())
         .fallback(proxy::handler)
         .with_state(state)
 }
