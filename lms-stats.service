@@ -7,7 +7,7 @@ Wants=network-online.target
 User=shawon
 WorkingDirectory=/home/shawon/Projects/lms-stats
 ExecStart=/home/shawon/Projects/lms-stats/target/release/lms-stats
-Environment=LMS_UPSTREAM=http://192.168.0.166:1234,http://192.168.0.163:1234
+Environment=LMS_UPSTREAM=http://192.168.0.166:1234
 Environment=LMS_LISTEN=0.0.0.0:1235
 Environment=LMS_DB=/var/lib/lms-stats/lms-stats.db
 StateDirectory=lms-stats

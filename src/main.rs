@@ -8,7 +8,7 @@ use lms_stats::{AppState, backup, db, router};
 mod service;
 
 pub(crate) const DEFAULT_UPSTREAM: &str =
-    "http://192.168.0.166:1234,http://192.168.0.163:1234";
+    "http://192.168.0.166:1234";
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
