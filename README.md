@@ -1,9 +1,9 @@
 # lms-stats
 
-A small proxy in front of one or more [LM Studio](https://lmstudio.ai)
-instances that counts tokens per request and shows them on a dashboard. LM
-Studio does not expose per-request usage anywhere; this does. With several
-instances, requests are routed to whichever one has the requested model.
+A small proxy in front of [LM Studio](https://lmstudio.ai) that counts tokens
+per request and shows them on a dashboard. LM Studio does not expose
+per-request usage anywhere; this does. One LM Studio instance; devices joined
+through LM Link are served by that instance and need nothing here.
 
 Single Rust binary, SQLite file, no auth. Meant for a trusted LAN.
 
@@ -15,7 +15,7 @@ Env vars (all optional):
 
 | Var            | Default                     | Meaning                              |
 |----------------|-----------------------------|--------------------------------------|
-| `LMS_UPSTREAM` | `http://192.168.0.166:1234` | LM Studio base URLs, comma-separated, plain `http://` (built without TLS) |
+| `LMS_UPSTREAM` | `http://localhost:1234`     | LM Studio base URL, plain `http://` (built without TLS). One instance; devices joined through LM Link sit behind it |
 | `LMS_LISTEN`   | `0.0.0.0:1235`              | Proxy and dashboard bind address     |
 | `LMS_DB`       | `./lms-stats.db`            | SQLite file, created if missing      |
 | `LMS_BACKUP_DIR` | `~/Documents/lms-stats`   | Weekly snapshots of the database (see [Backups](#backups)); set to empty to disable |
@@ -29,17 +29,6 @@ headers. Only these are counted:
 - `POST /v1/embeddings`
 
 Dashboard: `http://<this-host>:1235/dashboard` (`/` redirects there).
-
-## Several LM Studio instances
-
-With more than one URL in `LMS_UPSTREAM`, every counted request first asks each
-instance for `GET /v1/models` (2-second timeout, in parallel) and goes to the
-first instance that lists the request's `model`. Nothing is cached, so a model
-that was just downloaded or unloaded is picked up on the next request. If no
-instance lists the model, or none answers, the request goes to the first URL
-and LM Studio returns its own error. `GET /v1/models` through the proxy
-returns the lists of all instances concatenated, so clients see every model.
-Every other path goes to the first URL.
 
 ## Dashboard
 
@@ -61,7 +50,7 @@ Every other path goes to the first URL.
   page listens on `/api/events`; a 15-second poll is the fallback.
 - Chart.js and the IBM Plex Sans font load from CDNs; without internet the
   numbers and table still render, the chart does not.
-- Admin tab: every model downloaded on each LM Studio instance with its
+- Admin tab: every model downloaded on LM Studio with its
   loaded state and context length, and a Load (optional context length) or
   Unload button per model. This uses LM Studio's native REST API
   (`/api/v1/models`, `/api/v1/models/load`, `/api/v1/models/unload`), so the
@@ -84,9 +73,9 @@ The dashboard is a static page over three endpoints you can use directly:
 | `GET /api/models` | | Array of model ids seen so far |
 | `GET /api/active` | | `{ active: [...], completed }`: requests in flight (id, ts, endpoint, model, stream, chunks, elapsed_ms) and a count of rows written since start |
 | `GET /api/events` | | Server-sent events; each event is the same snapshot, sent on every request start/finish and once a second |
-| `GET /api/admin/models` | | `{ upstreams: [{ url, models, error }] }`: LM Studio's `/api/v1/models` entries per upstream, or an `error` string for one that is down |
-| `POST /api/admin/load` | JSON body `{ upstream, model, context_length? }` | LM Studio's load response, with its status; 400 if `upstream` is not one of `LMS_UPSTREAM`, 502 if it cannot be reached |
-| `POST /api/admin/unload` | JSON body `{ upstream, instance_id }` | LM Studio's unload response, same error handling |
+| `GET /api/admin/models` | | `{ url, models, error }`: LM Studio's `/api/v1/models` entries, or an `error` string when it cannot be reached |
+| `POST /api/admin/load` | JSON body `{ model, context_length? }` | LM Studio's load response, with its status; 502 if it cannot be reached |
+| `POST /api/admin/unload` | JSON body `{ instance_id }` | LM Studio's unload response, same error handling |
 
 Row fields: `id, ts, endpoint, model, prompt_tokens, completion_tokens,
 reasoning_tokens, total_tokens, stream, status, duration_ms, ttft_ms` (`ttft_ms`
@@ -133,7 +122,7 @@ again unless the client asked for it itself, so older SDKs that index
 
 The proxy stays up and answers with `502` and an OpenAI-style JSON error:
 
-    {"error":{"message":"LM Studio at http://192.168.0.166:1234 is unavailable: ...","type":"upstream_unavailable"}}
+    {"error":{"message":"LM Studio at http://localhost:1234 is unavailable: ...","type":"upstream_unavailable"}}
 
 Counted requests appear in the dashboard with status 502; other paths are
 forwarded but not recorded.
@@ -167,7 +156,7 @@ script passes:
 The script asks for administrator rights once (UAC), starts the service at
 boot, and restarts it on crash. Defaults, all overridable:
 
-    powershell -ExecutionPolicy Bypass -File install-service.ps1 -Upstream "http://192.168.0.166:1234" -Listen "0.0.0.0:1235" -DbPath "D:\data\lms-stats.db"
+    powershell -ExecutionPolicy Bypass -File install-service.ps1 -Upstream "http://localhost:1234" -Listen "0.0.0.0:1235" -DbPath "D:\data\lms-stats.db"
 
 | Setting  | Default                                |
 |----------|----------------------------------------|
@@ -203,7 +192,7 @@ Settings are environment variables when running the script, all optional:
 
 | Setting  | Default                                                    |
 |----------|------------------------------------------------------------|
-| Upstream | `http://192.168.0.166:1234`                                |
+| Upstream | `http://localhost:1234`                                |
 | Listen   | `0.0.0.0:1235`                                             |
 | Database | `~/Library/Application Support/lms-stats/lms-stats.db`     |
 | Backups  | `~/Documents/lms-stats` (`LMS_BACKUP_DIR=` to turn off)    |

@@ -1,7 +1,6 @@
 //! Load and unload models through LM Studio's native REST API (0.4 and later):
 //! `GET /api/v1/models`, `POST /api/v1/models/load`, `POST /api/v1/models/unload`.
-//! The `lms` CLI only manages the LM Studio on the machine it runs on, so the
-//! API is the one way to reach a remote upstream. Nothing here is recorded.
+//! Nothing here is recorded.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,75 +29,50 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/admin/unload", post(unload))
 }
 
-/// Every configured upstream with LM Studio's model list passed through as is
-/// (`key`, `display_name`, `loaded_instances`, ...), or an `error` string for
-/// one that is down or runs an LM Studio without the v1 API.
+/// LM Studio's model list passed through as is (`key`, `display_name`,
+/// `loaded_instances`, ...), or an `error` string when it is down or too old
+/// for the v1 API.
 async fn models(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let state = &*state;
-    let fetch = |u: &String| {
-        let url = format!("{u}/api/v1/models");
-        let u = u.clone();
-        async move {
-            let r = async {
-                let resp = state.client.get(&url).timeout(LIST_TIMEOUT).send().await?.error_for_status()?;
-                resp.json::<Value>().await
-            }
-            .await;
-            match r {
-                Ok(v) => json!({"url": u, "models": v["models"].as_array().cloned().unwrap_or_default(), "error": null}),
-                Err(e) => json!({"url": u, "models": [], "error": format!("{u}: {}", proxy::error_chain(&e))}),
-            }
-        }
-    };
-    let upstreams = futures_util::future::join_all(state.upstreams.iter().map(fetch)).await;
-    Json(json!({ "upstreams": upstreams }))
+    let u = &state.upstream;
+    let r = async {
+        let resp = state.client.get(format!("{u}/api/v1/models")).timeout(LIST_TIMEOUT).send().await?.error_for_status()?;
+        resp.json::<Value>().await
+    }
+    .await;
+    Json(match r {
+        Ok(v) => json!({"url": u, "models": v["models"].as_array().cloned().unwrap_or_default(), "error": null}),
+        Err(e) => json!({"url": u, "models": [], "error": format!("{u}: {}", proxy::error_chain(&e))}),
+    })
 }
 
 #[derive(Deserialize)]
 struct Load {
-    upstream: String,
     model: String,
     #[serde(default)]
     context_length: Option<u64>,
 }
 
 async fn load(State(state): State<Arc<AppState>>, Json(req): Json<Load>) -> Response {
-    let Some(u) = configured(&state, &req.upstream) else {
-        return not_configured();
-    };
     let mut body = json!({ "model": req.model });
     if let Some(n) = req.context_length {
         body["context_length"] = n.into();
     }
-    forward(&state, u, "/api/v1/models/load", body, LOAD_TIMEOUT).await
+    forward(&state, "/api/v1/models/load", body, LOAD_TIMEOUT).await
 }
 
 #[derive(Deserialize)]
 struct Unload {
-    upstream: String,
     instance_id: String,
 }
 
 async fn unload(State(state): State<Arc<AppState>>, Json(req): Json<Unload>) -> Response {
-    let Some(u) = configured(&state, &req.upstream) else {
-        return not_configured();
-    };
-    forward(&state, u, "/api/v1/models/unload", json!({ "instance_id": req.instance_id }), LOAD_TIMEOUT).await
+    forward(&state, "/api/v1/models/unload", json!({ "instance_id": req.instance_id }), LOAD_TIMEOUT).await
 }
 
-/// The dashboard may only talk to upstreams given at startup, never to an
-/// arbitrary host named in the request.
-fn configured<'a>(state: &'a AppState, upstream: &str) -> Option<&'a str> {
-    state.upstreams.iter().find(|u| u.as_str() == upstream).map(String::as_str)
-}
-
-fn not_configured() -> Response {
-    (StatusCode::BAD_REQUEST, Json(json!({ "error": "upstream is not configured" }))).into_response()
-}
-
-/// POST `body` to `upstream + path` and hand back LM Studio's status and body
-/// untouched, so its own error messages reach the page; 502 if it cannot be reached.
-async fn forward(state: &AppState, upstream: &str, path: &str, body: Value, timeout: Duration) -> Response {
+/// POST `body` to LM Studio and hand back its status and body untouched, so
+/// its own error messages reach the page; 502 if it cannot be reached.
+async fn forward(state: &AppState, path: &str, body: Value, timeout: Duration) -> Response {
+    let upstream = &state.upstream;
     let resp = match state.client.post(format!("{upstream}{path}")).timeout(timeout).json(&body).send().await {
         Ok(r) => r,
         Err(e) => {

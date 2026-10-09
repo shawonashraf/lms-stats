@@ -6,7 +6,7 @@
 #   ./install-service.sh
 #
 # Settings, all optional, as environment variables:
-#   LMS_UPSTREAM    "http://192.168.0.166:1234"
+#   LMS_UPSTREAM    "http://localhost:1234"
 #   LMS_LISTEN      "0.0.0.0:1235"
 #   LMS_DB          "$HOME/Library/Application Support/lms-stats/lms-stats.db"
 #   LMS_BACKUP_DIR  "$HOME/Documents/lms-stats"  (set to "" for no backups)
@@ -18,7 +18,7 @@ EXE="$DIR/target/release/lms-stats"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG="$HOME/Library/Logs/lms-stats.log"
 
-UPSTREAM="${LMS_UPSTREAM:-http://192.168.0.166:1234}"
+UPSTREAM="${LMS_UPSTREAM:-http://localhost:1234}"
 LISTEN="${LMS_LISTEN:-0.0.0.0:1235}"
 DB="${LMS_DB:-$HOME/Library/Application Support/lms-stats/lms-stats.db}"
 BACKUP_DIR="${LMS_BACKUP_DIR-$HOME/Documents/lms-stats}"

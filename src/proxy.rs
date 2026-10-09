@@ -21,9 +21,6 @@ const COUNTED: &[&str] = &["/v1/chat/completions", "/v1/completions", "/v1/embed
 /// leaves room for base64-encoded vision payloads.
 const MAX_BODY: usize = 64 << 20;
 
-/// A powered-off upstream must not stall routing for the others.
-const MODELS_TIMEOUT: Duration = Duration::from_secs(2);
-
 /// Headers that must not be copied between the two hops. `content-length` is
 /// recomputed; `accept-encoding` is dropped so upstream never compresses a body
 /// we need to read.
@@ -115,11 +112,6 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
 
-    if parts.method == Method::GET && path == "/v1/models" && state.upstreams.len() > 1 {
-        let data: Vec<Value> = models_of_each(&state).await.into_iter().flatten().collect();
-        return axum::Json(serde_json::json!({"object": "list", "data": data})).into_response();
-    }
-
     let mut counted = None;
     if parts.method == Method::POST
         && COUNTED.contains(&path.as_str())
@@ -153,10 +145,7 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
         });
     }
 
-    let base = match &counted {
-        Some(c) if state.upstreams.len() > 1 => pick_upstream(&state, &c.model).await,
-        _ => &state.upstreams[0],
-    };
+    let base = &state.upstream;
     let mut upstream = state.client.request(parts.method.clone(), format!("{base}{path_and_query}"));
     for (k, v) in &parts.headers {
         if !SKIP_HEADERS.contains(&k.as_str()) {
@@ -238,36 +227,6 @@ pub async fn handler(State(state): State<Arc<AppState>>, req: Request) -> Respon
     });
     let client_body = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
     build(status, headers, Body::from_stream(client_body))
-}
-
-/// The upstream whose `/v1/models` lists `model`; the first upstream when none does,
-/// so LM Studio produces its own error for an unknown model.
-async fn pick_upstream<'a>(state: &'a AppState, model: &str) -> &'a str {
-    models_of_each(state)
-        .await
-        .iter()
-        .zip(&state.upstreams)
-        .find(|(ids, _)| ids.iter().any(|m| m["id"] == model))
-        .map(|(_, u)| u.as_str())
-        .unwrap_or(&state.upstreams[0])
-}
-
-/// The `data` array of `/v1/models` from each upstream, in order; empty for an
-/// upstream that is down or answers garbage. Fetched fresh per request because
-/// LM Studio's list changes as models are downloaded or unloaded.
-async fn models_of_each(state: &AppState) -> Vec<Vec<Value>> {
-    let fetch = |u: &String| {
-        let url = format!("{u}/v1/models");
-        async move {
-            let v: Value = state.client.get(url).timeout(MODELS_TIMEOUT).send().await.ok()?.json().await.ok()?;
-            v.get("data")?.as_array().cloned()
-        }
-    };
-    futures_util::future::join_all(state.upstreams.iter().map(fetch))
-        .await
-        .into_iter()
-        .map(Option::unwrap_or_default)
-        .collect()
 }
 
 /// `err` and every cause below it, colon-separated: reqwest's top-level message

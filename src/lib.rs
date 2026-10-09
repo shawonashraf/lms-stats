@@ -9,9 +9,10 @@ pub mod usage;
 use std::sync::{Arc, Mutex};
 
 pub struct AppState {
-    /// Base URLs of the LM Studio instances without trailing slash, e.g.
-    /// `http://192.168.0.166:1234`. Never empty; the first is the default.
-    pub upstreams: Vec<String>,
+    /// Base URL of LM Studio without trailing slash, e.g. `http://localhost:1234`.
+    /// One instance only: devices joined through LM Link are federated by LM
+    /// Studio itself behind this URL.
+    pub upstream: String,
     pub client: reqwest::Client,
     pub db: Mutex<rusqlite::Connection>,
     pub live: live::Live,

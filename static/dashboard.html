@@ -81,8 +81,8 @@
   .tabs button.active { background: var(--panel); color: var(--ink); font-weight: 500; box-shadow: inset 0 0 0 1px var(--line); }
 
   .admin-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 18px 0 6px; color: var(--muted); font-size: 12px; }
-  .upstream h2 { margin: 22px 0 0; font-size: 13px; font-weight: 500; color: var(--ink-2); white-space: normal; }
-  .upstream h2 .err { color: var(--bad); font-weight: 400; margin-left: 10px; }
+  .upstream h2 { margin: 22px 0 0; font-size: 13px; font-weight: 400; white-space: normal; }
+  .upstream h2 .err { color: var(--bad); }
   .upstream .tablewrap { margin-top: 8px; }
   td.actions input { width: 90px; font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; margin-right: 6px; }
   td.actions input::placeholder { color: var(--muted); }
@@ -153,7 +153,7 @@
 
   <div id="tab-admin" hidden>
     <div class="admin-bar">
-      <span>Models on each LM Studio instance. Loading takes as long as LM Studio needs; the row stays busy until it answers.</span>
+      <span id="admin-intro">Loading takes as long as LM Studio needs; the row stays busy until it answers.</span>
       <span><span id="admin-status"></span> <button id="admin-refresh">Refresh</button></span>
     </div>
     <div id="admin"></div>
@@ -344,8 +344,8 @@ events.onmessage = (e) => {
   completed = snap.completed;
 };
 
-// Admin tab: model list per upstream from LM Studio's native REST API, with
-// load/unload. Rows with an action in flight survive re-renders via `pending`.
+// Admin tab: LM Studio's model list from its native REST API, with load/unload.
+// Rows with an action in flight survive re-renders via `pending`.
 const gb = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.round(n / 1e6)} MB`);
 const pending = new Map();
 
@@ -360,16 +360,15 @@ function showTab(name) {
   if (name === "admin") loadAdmin();
 }
 
-function modelRow(url, m) {
+function modelRow(m) {
   const inst = (m.loaded_instances || [])[0];
-  const key = `${url}|${m.key}`;
-  const busy = pending.get(key);
+  const busy = pending.get(m.key);
   const dis = busy ? "disabled" : "";
   const state = busy ? busy : inst ? `loaded, ctx ${fmt(inst.config?.context_length ?? 0)}` : '<span class="dim">not loaded</span>';
   const actions = inst
-    ? `<button data-act="unload" data-url="${esc(url)}" data-instance="${esc(inst.id)}" data-key="${esc(m.key)}" ${dis}>Unload</button>`
+    ? `<button data-act="unload" data-instance="${esc(inst.id)}" data-key="${esc(m.key)}" ${dis}>Unload</button>`
     : `<input type="number" min="1" step="1024" placeholder="ctx" aria-label="context length" ${dis}>` +
-      `<button data-act="load" data-url="${esc(url)}" data-model="${esc(m.key)}" data-key="${esc(m.key)}" ${dis}>Load</button>`;
+      `<button data-act="load" data-key="${esc(m.key)}" ${dis}>Load</button>`;
   return `<tr>
     <td title="${esc(m.display_name || "")}">${esc(m.key)}</td>
     <td class="dim">${esc(m.type || "")}</td>
@@ -381,22 +380,22 @@ function modelRow(url, m) {
   </tr>`;
 }
 
-function renderAdmin(upstreams) {
-  $("#admin").innerHTML = upstreams.map((u) => `<section class="upstream">
-    <h2>${esc(u.url)}${u.error ? `<span class="err">${esc(u.error)}</span>` : ""}</h2>
+function renderAdmin(u) {
+  $("#admin-intro").textContent = `Models on LM Studio at ${u.url}. Loading takes as long as LM Studio needs; the row stays busy until it answers.`;
+  $("#admin").innerHTML = `<section class="upstream">
+    ${u.error ? `<h2><span class="err">${esc(u.error)}</span></h2>` : ""}
     <div class="tablewrap"><table>
       <thead><tr><th>model</th><th>type</th><th>params</th><th>size</th><th>max ctx</th><th>status</th><th></th></tr></thead>
-      <tbody>${u.models.length ? u.models.map((m) => modelRow(u.url, m)).join("")
+      <tbody>${u.models.length ? u.models.map(modelRow).join("")
         : `<tr><td colspan="7" class="empty">${u.error ? "Unreachable, or an LM Studio older than 0.4 without the v1 API." : "No models downloaded."}</td></tr>`}</tbody>
     </table></div>
-  </section>`).join("");
+  </section>`;
 }
 
 async function loadAdmin() {
   $("#admin-status").textContent = "loading…";
   try {
-    const data = await (await fetch("/api/admin/models")).json();
-    renderAdmin(data.upstreams);
+    renderAdmin(await (await fetch("/api/admin/models")).json());
     $("#admin-status").textContent = `updated ${new Date().toLocaleTimeString()}`;
   } catch (e) {
     $("#admin-status").textContent = "update failed: " + (e && e.message ? e.message : e);
@@ -405,18 +404,18 @@ async function loadAdmin() {
 
 async function adminAction(b) {
   const row = b.closest("tr");
-  const body = { upstream: b.dataset.url };
+  const body = {};
   let path;
   if (b.dataset.act === "load") {
     path = "/api/admin/load";
-    body.model = b.dataset.model;
+    body.model = b.dataset.key;
     const ctx = Number(row.querySelector("input").value);
     if (ctx > 0) body.context_length = ctx;
   } else {
     path = "/api/admin/unload";
     body.instance_id = b.dataset.instance;
   }
-  const key = `${b.dataset.url}|${b.dataset.key}`;
+  const key = b.dataset.key;
   pending.set(key, b.dataset.act === "load" ? "loading…" : "unloading…");
   row.querySelectorAll("button, input").forEach((x) => (x.disabled = true));
   row.querySelector(".state").textContent = pending.get(key);
@@ -433,7 +432,7 @@ async function adminAction(b) {
   } catch (e) {
     pending.delete(key);
     await loadAdmin();
-    const cell = [...document.querySelectorAll("#admin button[data-key]")].find((x) => x.dataset.url === body.upstream && x.dataset.key === b.dataset.key)?.closest("tr")?.querySelector(".state");
+    const cell = [...document.querySelectorAll("#admin button[data-key]")].find((x) => x.dataset.key === key)?.closest("tr")?.querySelector(".state");
     if (cell) { cell.textContent = e.message; cell.classList.add("bad"); }
   }
 }

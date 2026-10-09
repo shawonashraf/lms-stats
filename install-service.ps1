@@ -5,13 +5,13 @@
 #   powershell -ExecutionPolicy Bypass -File install-service.ps1
 #
 # Optional parameters:
-#   -Upstream "http://192.168.0.166:1234"
+#   -Upstream "http://localhost:1234"
 #   -Listen   "0.0.0.0:1235"
 #   -DbPath   "C:\ProgramData\lms-stats\lms-stats.db"
 #   -BackupDir "D:\backups\lms-stats"   (default: your Documents\lms-stats)
 #   -NoBackup                           (no weekly snapshots)
 param(
-    [string]$Upstream = "http://192.168.0.166:1234",
+    [string]$Upstream = "http://localhost:1234",
     [string]$Listen = "0.0.0.0:1235",
     [string]$DbPath = "",
     # Resolved here, before elevation, so it is the invoking user's Documents

@@ -7,8 +7,7 @@ use lms_stats::{AppState, backup, db, router};
 #[cfg(windows)]
 mod service;
 
-pub(crate) const DEFAULT_UPSTREAM: &str =
-    "http://192.168.0.166:1234";
+pub(crate) const DEFAULT_UPSTREAM: &str = "http://localhost:1234";
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -45,11 +44,7 @@ async fn serve(
 ) -> Result<(), String> {
     let conn = db::open(&db_path).map_err(|e| format!("open {db_path}: {e}"))?;
     let state = Arc::new(AppState {
-        upstreams: upstream
-            .split(',')
-            .map(|u| u.trim().trim_end_matches('/').to_string())
-            .filter(|u| !u.is_empty())
-            .collect(),
+        upstream: upstream.trim().trim_end_matches('/').to_string(),
         client: reqwest::Client::new(),
         db: Mutex::new(conn),
         live: lms_stats::live::Live::new(),
